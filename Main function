@@ -901,5 +901,37 @@ def main():
         plt.close()
 
     print(f"\nSummary report saved to {report_path}")
+
+    # Run UMAP analysis with renamed rotations
+    try:
+        comprehensive_umap_from_shap(
+            cv_results_path=output_file,
+            pdx_df_path=file_path,
+            output_dirs=output_dirs
+        )
+        print("UMAP analysis with renamed rotations completed successfully.")
+    except Exception as e:
+        print(f"Error generating UMAP visualizations: {str(e)}")
+
+    for drug_name in ['Dasatinib', 'Venetoclax']:
+        try:
+            global_umap_results = generate_global_shap_umap(
+                pdx_df=pdx_df,
+                cv_results=cv_results,
+                drug_name=drug_name,
+                top_n_features=20,
+                output_dirs=output_dirs
+            )
+            print(f"Global UMAP analysis for {drug_name} completed successfully.")
+        except Exception as e:
+            print(f"Error generating global UMAP for {drug_name}: {str(e)}")
+    # Final timing and completion message
+    end_time = time.time()
+    total_time = (end_time - start_time) / 60 # in minutes
+    print(f"\nTotal execution time: {total_time:.2f} minutes")
+    print("\nPDX drug-specific rotation analysis completed successfully!")
+
+    return final_results
+
 if __name__ == "__main__":
     results = main()
