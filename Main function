@@ -219,3 +219,389 @@ def main():
     print("\nSample Venetoclax features:")
     for feat in sorted(venetoclax_features)[:10]:
         print(f"  - {feat}")
+#-------------------------------------------------------------
+    # DATA SPLITTING FOR PDX ROTATIONAL CROSS-VALIDATION
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("PDX ROTATIONAL CROSS-VALIDATION SETUP")
+    print("="*80)
+
+    # Define the sampling strategy for PDX groups for both drugs separately
+
+    # Make sure we have enough PDX groups
+    if len(pdx_groups) < 14:
+        print(f"WARNING: Not enough PDX groups (found {len(pdx_groups)}, need 14). Will adjust rotation accordingly.")
+
+    # Define custom PDX rotations for both drugs based on the provided information
+    print("\nManually setting up predefined PDX rotations for each drug...")
+
+    # Define Dasatinib rotations with actual PDX group names
+    dasatinib_rotations = [
+          {
+              'train': np.array(['SJ65', 'SJ49', 'SJ53', 'SJ52', '1054', '145', '741', '748', '4406']),
+              'val': np.array(['SJ7', '4426']),
+              'test': np.array(['758', '2176', '4404'])
+          },
+          {
+              'train': np.array(['SJ65', 'SJ49', 'SJ52', '4426', '4404', '4406', '741', '758', '2176']),
+              'val': np.array(['145', '748']),
+              'test': np.array(['SJ7', 'SJ53', '1054'])
+          },
+          {
+              'train': np.array(['SJ65', 'SJ53', '1054', '4404', 'SJ49', '748', '758', '2176']),
+              'val': np.array(['SJ7', '741']),
+              'test': np.array(['145', '4406', 'SJ52','4426'])
+          },
+          {
+              'train': np.array(['SJ7', 'SJ53', 'SJ52', '1054', '4426', '4404', '145', '2176']),
+              'val': np.array(['758', '4406']),
+              'test': np.array(['SJ65', 'SJ49', '741','748'])
+          }
+      ]
+
+
+    # Define Venetoclax rotations with actual PDX group names
+    venetoclax_rotations = [
+        {
+            'train': np.array(['SJ65', 'SJ7', '741', '4404', '748','SJ52', '1054', '4406', 'SJ49', '4426']),
+            'val': np.array(['748', 'SJ53']),
+            'test': np.array(['2176', '758', '145'])
+        },
+        {
+            'train': np.array(['SJ65', 'SJ7', 'SJ49', '4406', '4404', '741', '758', '2176']),
+            'val': np.array(['145', '1054']),
+            'test': np.array(['748', 'SJ52', 'SJ53','4426'])
+        },
+        {
+            'train': np.array(['SJ53', 'SJ7', 'SJ49', 'SJ52', '145', '1054', '748', '758']),
+            'val': np.array(['4406', '2176']),
+            'test': np.array(['4404', '741', 'SJ65'])
+        },
+        {
+            'train': np.array(['2176', 'SJ53', 'SJ52', '4426', '4404', '741', '758','145','SJ7']),
+            'val': np.array(['748', 'SJ65']),
+            'test': np.array(['1054', 'SJ49', '4406'])
+        }
+    ]
+
+    print(f"\nLoaded {len(dasatinib_rotations)} rotations for Dasatinib.")
+    print(f"Loaded {len(venetoclax_rotations)} rotations for Venetoclax.")
+
+    # Print a sample of the rotations for each drug
+    sample_size = min(3, len(dasatinib_rotations))
+    print(f"\nSample of {sample_size} Dasatinib rotations:")
+    for i in range(sample_size):
+        print(f"\nDasatinib Rotation {i+1}:")
+        print(f"  Training PDX ({len(dasatinib_rotations[i]['train'])}): {', '.join(dasatinib_rotations[i]['train'])}")
+        print(f"  Validation PDX ({len(dasatinib_rotations[i]['val'])}): {', '.join(dasatinib_rotations[i]['val'])}")
+        print(f"  Testing PDX ({len(dasatinib_rotations[i]['test'])}): {', '.join(dasatinib_rotations[i]['test'])}")
+
+    sample_size = min(3, len(venetoclax_rotations))
+    print(f"\nSample of {sample_size} Venetoclax rotations:")
+    for i in range(sample_size):
+        print(f"\nVenetoclax Rotation {i+1}:")
+        print(f"  Training PDX ({len(venetoclax_rotations[i]['train'])}): {', '.join(venetoclax_rotations[i]['train'])}")
+        print(f"  Validation PDX ({len(venetoclax_rotations[i]['val'])}): {', '.join(venetoclax_rotations[i]['val'])}")
+        print(f"  Testing PDX ({len(venetoclax_rotations[i]['test'])}): {', '.join(venetoclax_rotations[i]['test'])}")
+
+
+    # Define the best parameters for each drug based on previous optimization
+    dasatinib_params = {
+        'n_estimators': 100,
+        'learning_rate': 0.05,
+        'max_depth': 6,
+        'min_child_weight': 3,
+        'gamma': 0.1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'reg_alpha': 0.1,
+        'reg_lambda': 1.0
+    }
+
+    venetoclax_params = {
+        'n_estimators': 100,
+        'learning_rate': 0.05,
+        'max_depth': 5,
+        'min_child_weight': 3,
+        'gamma': 0.1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'reg_alpha': 0.1,
+        'reg_lambda': 1.0
+    }
+
+    # Prepare data for models
+    X_das = pdx_df[dasatinib_features]
+    y_dasatinib = pdx_df['Dasatinib Sensitivity']
+
+    X_ven = pdx_df[venetoclax_features]
+    y_venetoclax = pdx_df['Venetoclax Sensitivity']
+    # Prepare for results collection
+    cv_results = {
+        'dasatinib': {
+            'rotation_metrics': [],
+            'avg_metrics': {}
+        },
+        'venetoclax': {
+            'rotation_metrics': [],
+            'avg_metrics': {}
+        }
+    }
+
+    #-------------------------------------------------------------
+    # CROSS-VALIDATION FOR DASATINIB
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("ROTATIONAL CROSS-VALIDATION FOR DASATINIB")
+    print("="*80)
+
+    # Perform cross-validation for Dasatinib across all rotations
+    for rot_idx, rotation in enumerate(dasatinib_rotations):
+        rotation_name = f"Rotation {rot_idx+1}"
+        print(f"\nProcessing {rotation_name} for Dasatinib...")
+
+        # Get indices for train, validation, and test sets
+        train_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['train'])].index
+        val_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['val'])].index
+        test_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['test'])].index
+
+        print(f"Training samples: {len(train_indices)}")
+        print(f"Validation samples: {len(val_indices)}")
+        print(f"Test samples: {len(test_indices)}")
+        # Extract data for this rotation
+        X_train_rot = X_das.loc[train_indices]
+        y_train_rot = y_dasatinib.loc[train_indices]
+        X_val_rot = X_das.loc[val_indices]
+        y_val_rot = y_dasatinib.loc[val_indices]
+        X_test_rot = X_das.loc[test_indices]
+        y_test_rot = y_dasatinib.loc[test_indices]
+
+        # Train and evaluate model
+        rot_result = train_and_evaluate_xgboost(
+            X_train_rot, y_train_rot,
+            X_val_rot, y_val_rot,
+            X_test_rot, y_test_rot,
+            X_das.columns.tolist(),
+            drug_name=f"Dasatinib_{rotation_name}",
+            k_best=30,
+            xgb_params=dasatinib_params
+        )
+
+        # Store metrics
+        cv_results['dasatinib']['rotation_metrics'].append({
+            'rotation': rotation_name,
+            'accuracy': rot_result['accuracy'],
+            'roc_auc': rot_result['roc_auc'],
+            'f1_score': rot_result['f1_score'],
+            'precision': rot_result['precision'],
+            'recall': rot_result['recall'],
+            'train_groups': rotation['train'].tolist(),
+            'val_groups': rotation['val'].tolist(),
+            'test_groups': rotation['test'].tolist(),
+            'selected_features': rot_result['selected_features']
+        })
+        # Store predictions and true labels for later analysis
+        cv_results['dasatinib']['rotation_metrics'][-1]['y_test'] = y_test_rot.values
+        cv_results['dasatinib']['rotation_metrics'][-1]['y_pred_proba'] = rot_result['y_pred_proba']
+        # Generate plots
+        plot_roc_curve(rot_result['y_test'], rot_result['y_pred_proba'],
+                      f"Dasatinib_{rotation_name}", output_dirs)
+
+        plot_confusion_matrix(rot_result['y_test'], rot_result['y_pred'],
+                            f"Dasatinib_{rotation_name}", output_dirs)
+
+        plot_probability_distribution(rot_result['y_test'], rot_result['y_pred_proba'],
+                           f"Dasatinib_{rotation_name}", output_dirs,
+                           test_indices=test_indices, pdx_df=pdx_df)
+
+        plot_shap_analysis(rot_result['model'], rot_result['X_test_selected'],
+                        rot_result['selected_features'], f"Dasatinib_{rotation_name}",
+                        output_dirs, max_display=20)
+
+    # Print cross-validation summary for Dasatinib
+    print("\n" + "-"*50)
+    print("Dasatinib Cross-Validation Summary:")
+    print("-"*50)
+
+    for rot_metric in cv_results['dasatinib']['rotation_metrics']:
+        print(f"\n{rot_metric['rotation']}:")
+        print(f"  Test groups: {', '.join(rot_metric['test_groups'])}")
+        print(f"  Accuracy: {rot_metric['accuracy']:.4f}")
+        print(f"  ROC AUC: {rot_metric['roc_auc']:.4f}")
+        print(f"  F1 Score: {rot_metric['f1_score']:.4f}")
+        print(f"  Precision: {rot_metric['precision']:.4f}")
+        print(f"  Recall: {rot_metric['recall']:.4f}")
+    # Calculate average performance across rotations
+    avg_accuracy = np.mean([m['accuracy'] for m in cv_results['dasatinib']['rotation_metrics']])
+    avg_roc_auc = np.mean([m['roc_auc'] for m in cv_results['dasatinib']['rotation_metrics']])
+    avg_f1 = np.mean([m['f1_score'] for m in cv_results['dasatinib']['rotation_metrics']])
+    avg_precision = np.mean([m['precision'] for m in cv_results['dasatinib']['rotation_metrics']])
+    avg_recall = np.mean([m['recall'] for m in cv_results['dasatinib']['rotation_metrics']])
+
+    # Store average metrics
+    cv_results['dasatinib']['avg_metrics'] = {
+        'accuracy': avg_accuracy,
+        'roc_auc': avg_roc_auc,
+        'f1_score': avg_f1,
+        'precision': avg_precision,
+        'recall': avg_recall
+    }
+
+    print("\nAverage Performance:")
+    print(f"  Accuracy: {avg_accuracy:.4f}")
+    print(f"  ROC AUC: {avg_roc_auc:.4f}")
+    print(f"  F1 Score: {avg_f1:.4f}")
+    print(f"  Precision: {avg_precision:.4f}")
+    print(f"  Recall: {avg_recall:.4f}")
+
+    #-------------------------------------------------------------
+    # CROSS-VALIDATION FOR VENETOCLAX
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("ROTATIONAL CROSS-VALIDATION FOR VENETOCLAX")
+    print("="*80)
+
+    # Perform cross-validation for Venetoclax across all rotations
+    for rot_idx, rotation in enumerate(venetoclax_rotations):
+        rotation_name = f"Rotation {rot_idx+1}"
+        print(f"\nProcessing {rotation_name} for Venetoclax...")
+
+        # Get indices for train, validation, and test sets
+        train_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['train'])].index
+        val_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['val'])].index
+        test_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['test'])].index
+
+        print(f"Training samples: {len(train_indices)}")
+        print(f"Validation samples: {len(val_indices)}")
+        print(f"Test samples: {len(test_indices)}")
+
+        # Extract data for this rotation
+        X_train_rot = X_ven.loc[train_indices]
+        y_train_rot = y_venetoclax.loc[train_indices]
+        X_val_rot = X_ven.loc[val_indices]
+        y_val_rot = y_venetoclax.loc[val_indices]
+        X_test_rot = X_ven.loc[test_indices]
+        y_test_rot = y_venetoclax.loc[test_indices]
+
+        # Train and evaluate model
+        rot_result = train_and_evaluate_xgboost(
+            X_train_rot, y_train_rot,
+            X_val_rot, y_val_rot,
+            X_test_rot, y_test_rot,
+            X_ven.columns.tolist(),
+            drug_name=f"Venetoclax_{rotation_name}",
+            k_best=30,
+            xgb_params=venetoclax_params
+        )
+
+        # Store metrics
+        cv_results['venetoclax']['rotation_metrics'].append({
+            'rotation': rotation_name,
+            'accuracy': rot_result['accuracy'],
+            'roc_auc': rot_result['roc_auc'],
+            'f1_score': rot_result['f1_score'],
+            'precision': rot_result['precision'],
+            'recall': rot_result['recall'],
+            'train_groups': rotation['train'].tolist(),
+            'val_groups': rotation['val'].tolist(),
+            'test_groups': rotation['test'].tolist(),
+            'selected_features': rot_result['selected_features']
+        })
+        # Store predictions and true labels for later analysis
+        cv_results['venetoclax']['rotation_metrics'][-1]['y_test'] = y_test_rot.values
+        cv_results['venetoclax']['rotation_metrics'][-1]['y_pred_proba'] = rot_result['y_pred_proba']
+        # Generate plots
+        plot_roc_curve(rot_result['y_test'], rot_result['y_pred_proba'],
+                      f"Venetoclax_{rotation_name}", output_dirs)
+
+        plot_confusion_matrix(rot_result['y_test'], rot_result['y_pred'],
+                             f"Venetoclax_{rotation_name}", output_dirs)
+
+        plot_probability_distribution(rot_result['y_test'], rot_result['y_pred_proba'],
+                           f"Venetoclax_{rotation_name}", output_dirs,
+                           test_indices=test_indices, pdx_df=pdx_df)
+
+        plot_shap_analysis(rot_result['model'], rot_result['X_test_selected'],
+                         rot_result['selected_features'], f"Venetoclax_{rotation_name}",
+                         output_dirs, max_display=20)
+    # Print cross-validation summary for Venetoclax
+    print("\n" + "-"*50)
+    print("Venetoclax Cross-Validation Summary:")
+    print("-"*50)
+
+    for rot_metric in cv_results['venetoclax']['rotation_metrics']:
+        print(f"\n{rot_metric['rotation']}:")
+        print(f"  Test groups: {', '.join(rot_metric['test_groups'])}")
+        print(f"  Accuracy: {rot_metric['accuracy']:.4f}")
+        print(f"  ROC AUC: {rot_metric['roc_auc']:.4f}")
+        print(f"  F1 Score: {rot_metric['f1_score']:.4f}")
+        print(f"  Precision: {rot_metric['precision']:.4f}")
+        print(f"  Recall: {rot_metric['recall']:.4f}")
+
+    # Calculate average performance across rotations
+    avg_accuracy = np.mean([m['accuracy'] for m in cv_results['venetoclax']['rotation_metrics']])
+    avg_roc_auc = np.mean([m['roc_auc'] for m in cv_results['venetoclax']['rotation_metrics']])
+    avg_f1 = np.mean([m['f1_score'] for m in cv_results['venetoclax']['rotation_metrics']])
+    avg_precision = np.mean([m['precision'] for m in cv_results['venetoclax']['rotation_metrics']])
+    avg_recall = np.mean([m['recall'] for m in cv_results['venetoclax']['rotation_metrics']])
+
+    # Store average metrics
+    cv_results['venetoclax']['avg_metrics'] = {
+        'accuracy': avg_accuracy,
+        'roc_auc': avg_roc_auc,
+        'f1_score': avg_f1,
+        'precision': avg_precision,
+        'recall': avg_recall
+    }
+
+    print("\nAverage Performance:")
+    print(f"  Accuracy: {avg_accuracy:.4f}")
+    print(f"  ROC AUC: {avg_roc_auc:.4f}")
+    print(f"  F1 Score: {avg_f1:.4f}")
+    print(f"  Precision: {avg_precision:.4f}")
+    print(f"  Recall: {avg_recall:.4f}")
+
+    #-------------------------------------------------------------
+    # FEATURE IMPORTANCE ANALYSIS
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("FEATURE IMPORTANCE ANALYSIS")
+    print("="*80)
+
+    # Analyze feature importance across rotations for each drug
+    # Create dictionaries to store feature importance counts
+    dasatinib_feature_counts = {}
+    venetoclax_feature_counts = {}
+
+    # Count how many times each feature was selected across rotations
+    for rot_metrics in cv_results['dasatinib']['rotation_metrics']:
+        for feature in rot_metrics['selected_features']:
+            dasatinib_feature_counts[feature] = dasatinib_feature_counts.get(feature, 0) + 1
+
+    for rot_metrics in cv_results['venetoclax']['rotation_metrics']:
+        for feature in rot_metrics['selected_features']:
+            venetoclax_feature_counts[feature] = venetoclax_feature_counts.get(feature, 0) + 1
+
+    # Sort features by frequency
+    dasatinib_top_features = sorted(dasatinib_feature_counts.items(), key=lambda x: x[1], reverse=True)
+    venetoclax_top_features = sorted(venetoclax_feature_counts.items(), key=lambda x: x[1], reverse=True)
+
+    # Print top consistent features (selected in all rotations)
+    print("\nDasatinib features selected across all rotations:")
+    for feature, count in dasatinib_top_features:
+        if count == len(dasatinib_rotations):
+            print(f"  - {feature}")
+
+    print("\nVenetoclax features selected across all rotations:")
+    for feature, count in venetoclax_top_features:
+        if count == len(venetoclax_rotations):
+            print(f"  - {feature}")
+
+    # Print top 15 features by selection frequency
+    print("\nTop 15 Dasatinib features by selection frequency:")
+    for i, (feature, count) in enumerate(dasatinib_top_features[:15]):
+        print(f"  {i+1}. {feature} (selected in {count}/{len(dasatinib_rotations)} rotations)")
+
+    print("\nTop 15 Venetoclax features by selection frequency:")
+    for i, (feature, count) in enumerate(venetoclax_top_features[:15]):
+        print(f"  {i+1}. {feature} (selected in {count}/{len(venetoclax_rotations)} rotations)")
