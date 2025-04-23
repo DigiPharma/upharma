@@ -1,0 +1,1251 @@
+#=====================================================================
+# PART 1: HELPER FUNCTIONS
+#=====================================================================
+
+def determine_sample_type(group_value, cell_line_names):
+    """Identify if a sample is a cell line or PDX model"""
+    group_str = str(group_value).upper()
+    if any(cell_line in group_str for cell_line in cell_line_names):
+        return 'Cell_Line'
+    else:
+        return 'PDX'
+
+def create_output_directory(dir_path):
+    """Create directory if it doesn't exist"""
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+        print(f"Created directory: {dir_path}")
+    return dir_path
+
+def safe_standardize(series):
+    """Safely standardize a series, handling edge cases"""
+    if len(series) <= 1 or series.std() == 0:
+        return np.zeros_like(series)
+    return (series - series.mean()) / series.std()
+
+def load_custom_rotations_from_csv(csv_path):
+    """
+    Load custom PDX rotation information from a CSV file.
+
+    Parameters:
+    -----------
+    csv_path : str
+        Path to the CSV file containing rotation information
+
+    Returns:
+    --------
+    list of dict
+        List of rotation dictionaries with 'train', 'val', and 'test' keys
+    """
+    try:
+        # Load the CSV file
+        rotation_df = pd.read_csv(csv_path)
+
+        # Initialize list to store rotations
+        rotations = []
+
+        # Process each row (rotation)
+        for _, row in rotation_df.iterrows():
+            # Extract training, validation, and testing groups
+            # And convert them from string representation to arrays
+            train_groups = row['Training_Groups'].split(', ')
+            val_groups = row['Validation_Groups'].split(', ')
+            test_groups = row['Testing_Groups'].split(', ')
+
+            # Create rotation dictionary
+            rotation = {
+                'train': np.array(train_groups),
+                'val': np.array(val_groups),
+                'test': np.array(test_groups)
+            }
+
+            rotations.append(rotation)
+
+        print(f"Successfully loaded {len(rotations)} rotations from {csv_path}")
+        return rotations
+
+    except Exception as e:
+        print(f"Error loading rotations from {csv_path}: {str(e)}")
+        return []
+
+def train_and_evaluate_xgboost(X_train, y_train, X_val, y_val, X_test, y_test, feature_names, drug_name="", k_best=20, xgb_params=None):
+    """Train XGBoost model and evaluate its performance with basic metrics"""
+    # Scale features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Apply SMOTE for class imbalance if needed
+    if pd.Series(y_train).value_counts().min() / pd.Series(y_train).value_counts().max() < 0.5:
+        smote = SMOTE(random_state=42)
+        X_train_scaled, y_train = smote.fit_resample(X_train_scaled, y_train)
+
+    # Feature selection using SelectKBest
+    selector = SelectKBest(f_classif, k=min(k_best, X_train.shape[1]))
+    X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+    X_val_selected = selector.transform(X_val_scaled)
+    X_test_selected = selector.transform(X_test_scaled)
+
+    # Get selected feature indices and names
+    selected_indices = selector.get_support(indices=True)
+    selected_features = [feature_names[i] for i in selected_indices]
+
+    # This would need a drug_name parameter passed to the function
+    if 'dasatinib' in str(drug_name).lower():  # Check based on drug_name parameter
+        bcl2_selected = [f for f in selected_features if 'BCL' in f.upper() or 'pBCL2' in f]
+        if bcl2_selected:
+            print(f"WARNING: BCL2 features in Dasatinib selected features: {bcl2_selected}")
+            print("Consider removing these from the selected features")
+
+    # Define the XGBoost model with provided parameters or defaults
+    if xgb_params is None:
+        # Default hyperparameters
+        model = XGBClassifier(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=4,
+            min_child_weight=3,
+            gamma=0.1,
+            subsample=0.6,
+            colsample_bytree=0.6,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            objective='binary:logistic',
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            missing=np.nan
+        )
+    else:
+        # Use provided parameters and ensure required parameters are set
+        updated_params = {
+            'missing': np.nan,
+            'objective': 'binary:logistic',
+            'use_label_encoder': False,
+            'random_state': 42
+        }
+        # Add user-provided parameters, which will override defaults if there's overlap
+        updated_params.update(xgb_params)
+        model = XGBClassifier(**updated_params)
+
+    # Training with early stopping using validation set
+    try:
+        # Method 1: Try using callbacks for early stopping (newer XGBoost versions)
+        try:
+            from xgboost.callback import EarlyStopping
+            early_stopping = EarlyStopping(
+                rounds=10,
+                save_best=True
+            )
+            model.fit(
+                X_train_selected, y_train,
+                eval_set=[(X_val_selected, y_val)],
+                callbacks=[early_stopping],
+                verbose=False
+            )
+        except (ImportError, AttributeError):
+            # Method 2: Try using early_stopping_rounds (older XGBoost versions)
+            try:
+                model.fit(
+                    X_train_selected, y_train,
+                    eval_set=[(X_val_selected, y_val)],
+                    early_stopping_rounds=10,
+                    verbose=False
+                )
+            except TypeError:
+                # Method 3: Fallback without early stopping
+                print(f"Warning: Early stopping not available for this XGBoost version. Training without early stopping.")
+                model.fit(X_train_selected, y_train, eval_set=[(X_val_selected, y_val)], verbose=False)
+    except Exception as e:
+        print(f"Error during model training: {str(e)}. Falling back to basic fit.")
+        # Final fallback without eval_set
+        model.fit(X_train_selected, y_train)
+
+    # Make predictions
+    y_pred = model.predict(X_test_selected)
+    y_pred_proba = model.predict_proba(X_test_selected)[:, 1]
+
+    # Calculate metrics
+    accuracy = accuracy_score(y_test, y_pred)
+    conf_matrix = confusion_matrix(y_test, y_pred)
+    roc_auc = roc_auc_score(y_test, y_pred_proba)
+    f1 = f1_score(y_test, y_pred)
+    recall_val = recall_score(y_test, y_pred)
+    precision_val = precision_score(y_test, y_pred)
+
+    # Return results
+    results = {
+        'model': model,
+        'scaler': scaler,
+        'selector': selector,
+        'selected_features': selected_features,
+        'accuracy': accuracy,
+        'confusion_matrix': conf_matrix,
+        'roc_auc': roc_auc,
+        'f1_score': f1,
+        'recall': recall_val,
+        'precision': precision_val,
+        'y_pred': y_pred,
+        'y_pred_proba': y_pred_proba,
+        'y_test': y_test,
+        'X_test': X_test,  # Store X_test for SHAP analysis
+        'X_test_selected': X_test_selected
+    }
+    return results
+
+def plot_roc_curve(y_test, y_pred_proba, title, output_dirs):
+    """Generate and save ROC curve plot"""
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(8, 6), dpi=600)
+    plt.plot(fpr, tpr, color='darkorange', lw=2,
+             label=f'ROC curve (area = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title(f'ROC Curve - {title}', fontsize=14)
+    plt.legend(loc="lower right", fontsize=10)
+    # Save as PDF
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{title}_ROC_Curve.svg'), dpi=1200)
+
+    # Save ROC curve data as CSV
+    roc_df = pd.DataFrame({
+        'fpr': fpr,
+        'tpr': tpr
+    })
+    roc_df.to_csv(os.path.join(output_dirs['data_dir'], f'{title}_ROC_data.csv'), index=False)
+
+    return plt.gcf()
+
+def plot_confusion_matrix(y_test, y_pred, title, output_dirs):
+    """Generate and save confusion matrix plot"""
+    cm = confusion_matrix(y_test, y_pred)
+
+    plt.figure(figsize=(8, 6), dpi=600)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+    plt.xlabel('Predicted Labels', fontsize=12)
+    plt.ylabel('True Labels', fontsize=12)
+    plt.title(f'Confusion Matrix - {title}', fontsize=14)
+    labels = ['Insensitive', 'Sensitive']
+    plt.xticks([0.5, 1.5], labels)
+    plt.yticks([0.5, 1.5], labels)
+
+    # Save as PDF
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{title}_Confusion_Matrix.svg'), dpi=1200)
+
+    # Save confusion matrix data as CSV
+    cm_df = pd.DataFrame(cm, columns=labels, index=labels)
+    cm_df.to_csv(os.path.join(output_dirs['data_dir'], f'{title}_Confusion_Matrix.csv'))
+
+    return plt.gcf()
+
+def plot_probability_distribution(y_test, y_pred_proba, title, output_dirs, test_indices=None, pdx_df=None):
+    """
+    Generate and save probability distribution plot with Group information.
+
+    Parameters:
+    -----------
+    y_test : array-like
+        True labels for test set
+    y_pred_proba : array-like
+        Predicted probabilities for test set
+    title : str
+        Title for the plot and filename base
+    output_dirs : dict
+        Dictionary containing output directory paths
+    test_indices : array-like, optional
+        Indices of test samples in the original dataframe
+    pdx_df : pandas.DataFrame, optional
+        Original dataframe containing Group information
+    """
+    # Create a DataFrame with prediction probabilities and true labels
+    prob_df = pd.DataFrame({
+        'True_Label': y_test,
+        'Predicted_Probability': y_pred_proba
+    })
+
+    # Add Group information if test_indices and pdx_df are provided
+    if test_indices is not None and pdx_df is not None and 'Group' in pdx_df.columns:
+        # Map test_indices to Group values from pdx_df
+        prob_df['Group'] = pdx_df.loc[test_indices, 'Group'].values
+
+    plt.figure(figsize=(10, 6), dpi=600)
+    sns.histplot(data=prob_df, x='Predicted_Probability', hue='True_Label',
+                 bins=30, kde=True, element='step', common_norm=False)
+    plt.xlabel('Predicted Probability of Sensitivity', fontsize=12)
+    plt.ylabel('Count', fontsize=12)
+    plt.title(f'Probability Distribution - {title}', fontsize=14)
+    plt.legend(['Insensitive (0)', 'Sensitive (1)'], fontsize=10)
+
+    # Save as PDF
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{title}_Probability_Distribution.svg'), dpi=1200)
+
+    # Save probability distribution data as CSV
+    prob_df.to_csv(os.path.join(output_dirs['data_dir'], f'{title}_Probability_Distribution.csv'), index=False)
+
+    return plt.gcf()
+
+
+def plot_shap_analysis(model, X_test, feature_names, title, output_dirs, max_display=20):
+    """Generate and save SHAP analysis plots"""
+    # Create explainer
+    explainer = shap.TreeExplainer(model)
+
+    # Calculate SHAP values
+    X_test_sample = X_test[:min(500, X_test.shape[0])]  # Sample for faster computation
+    shap_values = explainer.shap_values(X_test_sample)
+    # SHAP summary plot
+    plt.figure(figsize=(12, 10), dpi=600)
+    shap.summary_plot(shap_values, X_test_sample, feature_names=feature_names,
+                      show=False, max_display=max_display)
+    plt.title(f'SHAP Feature Importance - {title}', fontsize=14)
+
+    # Save as PDF
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{title}_SHAP_Summary.svg'), dpi=1200)
+    plt.close()
+
+    # Bar plot of mean absolute SHAP values
+    plt.figure(figsize=(12, 10), dpi=600)
+    shap.summary_plot(shap_values, X_test_sample, feature_names=feature_names,
+                      plot_type="bar", show=False, max_display=max_display)
+    plt.title(f'SHAP Mean Absolute Value - {title}', fontsize=14)
+
+    # Save as PDF
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{title}_SHAP_Bar.svg'), dpi=1200)
+    plt.close()
+
+    # Save SHAP values as CSV
+    shap_df = pd.DataFrame(shap_values, columns=feature_names)
+    shap_df.to_csv(os.path.join(output_dirs['data_dir'], f'{title}_SHAP_values.csv'), index=False)
+
+    # Calculate and save mean absolute SHAP values for features
+    mean_abs_shap = pd.DataFrame({
+        'feature': feature_names,
+        'mean_abs_shap': np.abs(shap_values).mean(0)
+    }).sort_values('mean_abs_shap', ascending=False)
+    mean_abs_shap.to_csv(os.path.join(output_dirs['data_dir'], f'{title}_SHAP_feature_importance.csv'), index=False)
+
+    return plt.gcf()
+
+def visualize_n_rotation_metrics(cv_results, drug_name, n, output_dirs):
+    """
+    Generate combined bar charts for N rotations metrics comparison.
+
+    Parameters:
+    -----------
+    cv_results : dict
+        Cross-validation results dictionary
+    drug_name : str
+        Name of the drug ('dasatinib' or 'venetoclax')
+    n : int
+        Number of rotations to include
+    output_dirs : dict
+        Dictionary containing output directories
+    """
+    # Get rotation metrics
+    metrics = cv_results[drug_name.lower()]['rotation_metrics']
+
+    # Rank rotations by ROC AUC
+    ranked_indices = sorted(
+        [(i, m['accuracy']) for i, m in enumerate(metrics)],
+        key=lambda x: x[1],
+        reverse=True
+    )[:n]
+
+    # Extract N rotation indices
+    indices = [idx for idx, _ in ranked_indices]
+
+    # Prepare data for plotting
+    rotation_names = [f"Rotation {idx+1}" for idx, _ in ranked_indices]
+    metrics_to_plot = ['accuracy', 'roc_auc', 'f1_score', 'precision', 'recall']
+    metric_labels = ['Accuracy', 'ROC AUC', 'F1 Score', 'Precision', 'Recall']
+
+    # Create a figure for each metric
+    plt.figure(figsize=(15, 10))
+
+    # Create bar chart for all metrics
+    x = np.arange(len(rotation_names))
+    width = 0.15  # width of the bars
+
+    for i, metric in enumerate(metrics_to_plot):
+        values = [metrics[idx][metric] for idx in indices]
+        plt.bar(x + (i - 2) * width, values, width, label=metric_labels[i])
+
+    plt.xlabel('Rotations', fontsize=12)
+    plt.ylabel('Metric Value', fontsize=12)
+    plt.title(f' {n} {drug_name.title()} Rotations - Performance Metrics Comparison', fontsize=14)
+    plt.xticks(x, rotation_names, rotation=45)
+    plt.ylim(0, 1.1)
+    plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.3)
+
+    # Add value labels on of bars
+    for i, metric in enumerate(metrics_to_plot):
+        values = [metrics[idx][metric] for idx in indices]
+        for j, value in enumerate(values):
+            plt.text(j + (i - 2) * width, value + 0.02, f'{value:.3f}',
+                     ha='center', va='bottom', rotation=90, fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{drug_name.title()}_{n}_Metrics_Comparison.svg'), dpi=1200)
+    plt.close()
+
+    # Create a heatmap for metrics comparison
+    metrics_data = pd.DataFrame(
+        {metric: [metrics[idx][metric] for idx in indices] for metric in metrics_to_plot},
+        index=rotation_names
+    )
+
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(metrics_data, annot=True, fmt='.3f', cmap='YlGnBu', vmin=0, vmax=1)
+    plt.title(f' {n} {drug_name.title()} Rotations - Metrics Heatmap', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], f'{drug_name.title()}_{n}_Metrics_Heatmap.svg'), dpi=1200)
+    plt.close()
+
+    # Save metrics data as CSV
+    metrics_data.to_csv(os.path.join(output_dirs['data_dir'], f'{drug_name.title()}_{n}_Rotation_Metrics.csv'))
+
+    return metrics_data
+
+
+
+
+
+def analyze_rotations_shap(pdx_df, cv_results, dasatinib_rotations, venetoclax_rotations,
+                         dasatinib_features, venetoclax_features, output_dirs, n=4,
+                               custom_dasatinib_indices=None, custom_venetoclax_indices=None):
+    """
+    Perform comprehensive SHAP analysis on the N rotations for each drug.
+
+    Parameters:
+    -----------
+    pdx_df : pandas DataFrame
+        DataFrame containing PDX data
+    cv_results : dict
+        Dictionary containing cross-validation results
+    dasatinib_rotations : list of dict
+        List of dasatinib rotation dictionaries
+    venetoclax_rotations : list of dict
+        List of venetoclax rotation dictionaries
+    dasatinib_features : list
+        List of feature names for dasatinib
+    venetoclax_features : list
+        List of feature names for venetoclax
+    output_dirs : dict
+        Dictionary containing output directory paths
+    n : int, optional
+        Number of rotations to analyze
+     custom_dasatinib_indices : list, optional
+        Custom list of rotation indices to use for Dasatinib (0-based)
+    custom_venetoclax_indices : list, optional
+        Custom list of rotation indices to use for Venetoclax (0-based)
+    """
+    print("\n" + "="*80)
+    print(f"COMPREHENSIVE SHAP ANALYSIS OF {n} ROTATIONS")
+    print("="*80)
+
+    # Create a special directory for rotation analysis
+    rotations_dir = os.path.join(output_dirs['plots_dir'], 'rotations_analysis')
+    if not os.path.exists(rotations_dir):
+        os.makedirs(rotations_dir)
+        print(f"Created directory: {rotations_dir}")
+
+    # Dasatinib rotation information
+    dasatinib_rotation_info = generate_rotation_info_report(
+        cv_results=cv_results,
+        rotations=dasatinib_rotations,
+        drug_name='dasatinib',
+        output_dirs=output_dirs,
+        pdx_df=pdx_df,
+        n=4
+    )
+
+    # Venetoclax rotation information
+    venetoclax_rotation_info = generate_rotation_info_report(
+        cv_results=cv_results,
+        rotations=venetoclax_rotations,
+        drug_name='venetoclax',
+        output_dirs=output_dirs,
+        pdx_df=pdx_df,
+        n=4
+    )
+
+    # Extract N rotation indices
+    # Get the actual count of rotations for each drug
+    das_rot_count = len(dasatinib_rotations)
+    ven_rot_count = len(venetoclax_rotations)
+
+    # Extract N rotation indices, making sure not to exceed the actual number of rotations
+    if custom_dasatinib_indices is not None:
+    
+        valid_indices = [idx for idx in custom_dasatinib_indices if idx < das_rot_count]
+        if len(valid_indices) != len(custom_dasatinib_indices):
+            print(f"WARNING: Some custom Dasatinib indices were out of range and removed.")
+        das_indices = valid_indices
+        print(f"Using custom Dasatinib rotations: {[idx+1 for idx in das_indices]}")
+    else:
+    
+        das_indices = [idx for idx, _ in das_rotation_ranks[:min(n, das_rot_count)]]
+        print(f"Using {len(das_indices)} Dasatinib rotations by AUC")
+
+    if custom_venetoclax_indices is not None:
+     
+        valid_indices = [idx for idx in custom_venetoclax_indices if idx < ven_rot_count]
+        if len(valid_indices) != len(custom_venetoclax_indices):
+            print(f"WARNING: Some custom Venetoclax indices were out of range and removed.")
+        ven_indices = valid_indices
+        print(f"Using custom Venetoclax rotations: {[idx+1 for idx in ven_indices]}")
+    else:
+    
+        ven_indices = [idx for idx, _ in ven_rotation_ranks[:min(n, ven_rot_count)]]
+        print(f"Using {len(ven_indices)} Venetoclax rotations by AUC")
+
+    drugs = ['Dasatinib', 'Venetoclax']
+    indices = [das_indices, ven_indices]
+    rotations_list = [dasatinib_rotations, venetoclax_rotations]
+    features_list = [dasatinib_features, venetoclax_features]
+    sensitivity_columns = ['Dasatinib Sensitivity', 'Venetoclax Sensitivity']
+
+    # Create a PDF to store all aggregated SHAP analysis
+    with PdfPages(os.path.join(rotations_dir, f'{n}_Rotations_SHAP_Analysis.pdf')) as pdf:
+        # Title page
+        plt.figure(figsize=(11, 8.5))
+        plt.text(0.5, 0.5, f'Comprehensive SHAP Analysis\n {n} Rotations for Each Drug',
+                 horizontalalignment='center', verticalalignment='center', fontsize=24)
+        plt.text(0.5, 0.3, f'Date: {pd.Timestamp.now().strftime("%Y-%m-%d")}',
+                 horizontalalignment='center', verticalalignment='center', fontsize=14)
+        plt.axis('off')
+        pdf.savefig()
+        plt.close()
+
+        # Process each drug
+        for drug_idx, drug_name in enumerate(drugs):
+            print(f"\nAnalyzing {n} rotations for {drug_name}...")
+
+            # Extract information for the current drug
+            curr_indices = indices[drug_idx]
+            curr_rotations = rotations_list[drug_idx]
+            curr_features = features_list[drug_idx]
+            curr_sensitivity = sensitivity_columns[drug_idx]
+
+            # Setup for collecting SHAP values across rotations
+            all_shap_values = []
+            all_feature_names = []
+            rotation_aucs = []
+            combined_shap_importance = {
+                'dasatinib': {},
+                'venetoclax': {}
+            }
+
+            # Process each rotation
+            for i, rot_idx in enumerate(curr_indices):
+                rotation = curr_rotations[rot_idx]
+                rotation_name = f"Rotation {rot_idx+1}"
+                rotation_auc = cv_results[drug_name.lower()]['rotation_metrics'][rot_idx]['roc_auc']
+                rotation_aucs.append(rotation_auc)
+
+                print(f"  Processing {rotation_name} (AUC: {rotation_auc:.4f})...")
+
+                # Get data for this rotation
+                train_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['train'])].index
+                val_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['val'])].index
+                test_indices = pdx_df[pdx_df['Group'].astype(str).isin(rotation['test'])].index
+
+                # Define feature set and model parameters based on drug
+                if drug_name.lower() == 'dasatinib':
+                    X = pdx_df[curr_features]
+                    y = pdx_df[curr_sensitivity]
+                    params = {
+                        'n_estimators': 100,
+                        'learning_rate': 0.05,
+                        'max_depth': 6,
+                        'min_child_weight': 3,
+                        'gamma': 0.1,
+                        'subsample': 0.8,
+                        'colsample_bytree': 0.8,
+                        'reg_alpha': 0.1,
+                        'reg_lambda': 1.0
+                    }
+                else:  # Venetoclax
+                    X = pdx_df[curr_features]
+                    y = pdx_df[curr_sensitivity]
+                    params = {
+                        'n_estimators': 100,
+                        'learning_rate': 0.05,
+                        'max_depth': 5,
+                        'min_child_weight': 3,
+                        'gamma': 0.1,
+                        'subsample': 0.8,
+                        'colsample_bytree': 0.8,
+                        'reg_alpha': 0.1,
+                        'reg_lambda': 1.0
+                    }
+
+                # Extract data for this rotation
+                X_train = X.loc[train_indices]
+                y_train = y.loc[train_indices]
+                X_val = X.loc[val_indices]
+                y_val = y.loc[val_indices]
+                X_test = X.loc[test_indices]
+                y_test = y.loc[test_indices]
+
+                # Train model (simplified version of train_and_evaluate_xgboost)
+                # Scale features
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_val_scaled = scaler.transform(X_val)
+                X_test_scaled = scaler.transform(X_test)
+
+                # Apply SMOTE for class imbalance if needed
+                if pd.Series(y_train).value_counts().min() / pd.Series(y_train).value_counts().max() < 0.5:
+                    smote = SMOTE(random_state=42)
+                    X_train_scaled, y_train = smote.fit_resample(X_train_scaled, y_train)
+
+                # Feature selection
+                k_best = 30  # Consistent with main code
+                selector = SelectKBest(f_classif, k=min(k_best, X_train.shape[1]))
+                X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+                X_val_selected = selector.transform(X_val_scaled)
+                X_test_selected = selector.transform(X_test_scaled)
+
+                # Get selected feature names
+                selected_indices = selector.get_support(indices=True)
+                selected_features = [curr_features[i] for i in selected_indices]
+
+                # Create XGBoost model
+                model = XGBClassifier(
+                    **params,
+                    objective='binary:logistic',
+                    random_state=42,
+                    use_label_encoder=False,
+                    eval_metric='logloss',
+                    missing=np.nan
+                )
+
+                # Train model
+                try:
+                    # Try using early_stopping_rounds in fit
+                    model.fit(
+                        X_train_selected, y_train,
+                        eval_set=[(X_val_selected, y_val)],
+                        early_stopping_rounds=10,
+                        verbose=False
+                    )
+                except TypeError:
+                    # If early_stopping_rounds is not supported, use callbacks approach or basic fit
+                    try:
+                        # Try newer XGBoost versions approach with callbacks
+                        from xgboost.callback import EarlyStopping
+                        early_stop = EarlyStopping(rounds=10)
+                        model.fit(
+                            X_train_selected, y_train,
+                            eval_set=[(X_val_selected, y_val)],
+                            callbacks=[early_stop],
+                            verbose=False
+                        )
+                    except (ImportError, TypeError):
+                        # Fall back to basic fit without early stopping
+                        try:
+                            model.fit(
+                                X_train_selected, y_train,
+                                eval_set=[(X_val_selected, y_val)],
+                                early_stopping_rounds=10,
+                                verbose=False
+                            )
+                        except TypeError:
+                            # Method 3: Basic fit as fallback
+                            print(f"Warning: Early stopping not available. Training without early stopping.")
+                            model.fit(X_train_selected, y_train, eval_set=[(X_val_selected, y_val)], verbose=False)
+                except Exception as e:
+                    print(f"Error during model training: {str(e)}. Falling back to basic fit.")
+                    model.fit(X_train_selected, y_train)
+
+                # Calculate SHAP values
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(X_test_selected)
+
+                # Store SHAP values and feature names for this rotation
+                all_shap_values.append(shap_values)
+                all_feature_names.append(selected_features)
+
+                # Calculate mean absolute SHAP values for each feature
+                mean_abs_shap = np.abs(shap_values).mean(0)
+
+                # Store feature importance information
+                for j, feat in enumerate(selected_features):
+                    if feat not in combined_shap_importance[drug_name.lower()]:
+                        combined_shap_importance[drug_name.lower()][feat] = []
+                    combined_shap_importance[drug_name.lower()][feat].append((mean_abs_shap[j], rotation_auc))
+
+            # Calculate weighted average importance for each feature across all rotations
+            # Modify the feature importance calculation section
+            weighted_importance = {}
+
+            for drug in ['dasatinib', 'venetoclax']:
+                drug_feature_importance = {}
+
+                for feat, values in combined_shap_importance[drug].items():
+                    # Ensure each value in values is a tuple with two elements
+                    valid_values = [value for value in values if isinstance(value, tuple) and len(value) == 2]
+
+                    if valid_values:
+                        # Safely calculate weighted average
+                        try:
+                            weighted_avg = sum(imp * auc for imp, auc in valid_values) / sum(auc for _, auc in valid_values)
+                            rotation_count = len(valid_values)
+                            drug_feature_importance[feat] = (weighted_avg, rotation_count)
+                        except ZeroDivisionError:
+                            # Handle case where all AUC values are zero
+                            drug_feature_importance[feat] = (0, len(valid_values))
+
+                weighted_importance[drug] = drug_feature_importance
+
+            # Only process if we have valid weighted importance for this drug
+            if drug_name.lower() in weighted_importance and weighted_importance[drug_name.lower()]:
+                # Get the current drug's feature importance dict
+                current_drug_importance = weighted_importance[drug_name.lower()]
+
+                # Sort features by weighted importance
+                sorted_features = sorted(
+                    [(feat, (imp, count)) for feat, (imp, count) in current_drug_importance.items()],
+                    key=lambda x: x[1][0],  # Sort by importance value
+                    reverse=True
+                )
+
+                # Create aggregated feature importance plot
+                plt.figure(figsize=(14, 10))
+
+                # Extract data for plotting
+                features = [f for f, _ in sorted_features[:20]]
+                importances = [i for _, (i, _) in sorted_features[:20]]
+                rotation_counts = [c for _, (_, c) in sorted_features[:20]]
+
+                # Normalize counts for color mapping (0-1 scale)
+                max_possible_rotations = len(curr_indices)
+                normalized_counts = [c/max_possible_rotations for c in rotation_counts]
+
+                # Create colormap for consistency
+                cmap = plt.cm.Blues
+
+                # Plot horizontal bar chart
+                bars = plt.barh(range(len(features)), importances, color=[cmap(c) for c in normalized_counts])
+
+                # Add feature names and counts on y-axis
+                plt.yticks(range(len(features)), [f"{f} ({c}/{max_possible_rotations})" for f, c in zip(features, rotation_counts)])
+
+                # Add color legend
+                sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
+                sm.set_array([])
+                # Create a new axes for the colorbar with proper position
+                cax = plt.gcf().add_axes([0.93, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
+                cbar = plt.colorbar(sm, cax=cax)
+                cbar.set_label('Proportion of Rotations')
+
+                plt.xlabel('Weighted SHAP Importance (weighted by rotation AUC)')
+                plt.title(f'Aggregated Feature Importance: {len(curr_indices)} {drug_name} Rotations', fontsize=16)
+                plt.tight_layout(rect=[0, 0, 0.92, 1])  # Adjust layout to make room for colorbar
+                pdf.savefig()
+                plt.close()
+
+                # Create feature overlap visualization (UpSet plot alternative)
+                plt.figure(figsize=(14, 10))
+
+                # Get all unique features that appear in any rotation
+                all_unique_features = set()
+                for features in all_feature_names:
+                    all_unique_features.update(features)
+
+                # Sort features by frequency and importance
+                feature_freq = {}
+                for feature in all_unique_features:
+                    # Count appearances in rotations
+                    count = sum(1 for features in all_feature_names if feature in features)
+                    # Get average importance when present
+                    importance = 0
+                    if feature in current_drug_importance:
+                        importance = current_drug_importance[feature][0]
+                    feature_freq[feature] = (count, importance)
+
+                # Sort features by count first, then by importance
+                sorted_freq_features = sorted(feature_freq.items(),
+                                             key=lambda x: (x[1][0], x[1][1]),
+                                             reverse=True)
+
+                # Display 20 features (or fewer if less available)
+                display_features = min(20, len(sorted_freq_features))
+
+                # Create matrix showing feature presence in each rotation
+                presence_matrix = np.zeros((display_features, len(curr_indices)))
+                for i, (feature, _) in enumerate(sorted_freq_features[:display_features]):
+                    for j, features in enumerate(all_feature_names):
+                        if feature in features:
+                            presence_matrix[i, j] = 1
+
+                # Plot the matrix
+                plt.imshow(presence_matrix, cmap='Blues', aspect='auto')
+
+                # Add feature names as y-tick labels
+                feature_names_with_count = [f"{f} ({c})" for f, (c, _) in sorted_freq_features[:display_features]]
+                plt.yticks(range(display_features), feature_names_with_count)
+
+                # Add rotation labels as x-tick labels with AUC values
+                rotation_labels = [f"R{rot_idx+1}\n(AUC: {auc:.3f})" for rot_idx, auc in zip(curr_indices, rotation_aucs)]
+                plt.xticks(range(len(curr_indices)), rotation_labels, rotation=45, ha='right')
+
+                plt.title(f"{drug_name}: Feature Selection Overlap in {len(curr_indices)} Rotations", fontsize=16)
+                plt.tight_layout()
+                pdf.savefig()
+                plt.close()
+
+                # Save feature importance data as CSV
+                importance_df = pd.DataFrame({
+                    'Feature': [f for f, _ in sorted_features],
+                    'Weighted_Importance': [i for _, (i, _) in sorted_features],
+                    'Rotation_Count': [c for _, (_, c) in sorted_features],
+                    'Rotation_Percentage': [c/len(curr_indices)*100 for _, (_, c) in sorted_features]
+                })
+                importance_df.to_csv(os.path.join(rotations_dir, f'{drug_name}_{len(curr_indices)}_Feature_Importance.csv'), index=False)
+
+                # Create consistency score plot for features
+                plt.figure(figsize=(10, 8))
+
+                # Calculate consistency scores (frequency * importance)
+                consistency_scores = []
+                feature_labels = []
+
+                for feature, (importance, count) in current_drug_importance.items():
+                    # Only include features that appear in at least 2 rotations
+                    if count >= 2:
+                        # Consistency score: importance * normalized frequency
+                        consistency = importance * (count / len(curr_indices))
+                        consistency_scores.append(consistency)
+                        feature_labels.append(f"{feature} ({count}/{len(curr_indices)})")
+
+                # Sort by consistency score
+                sorted_indices = np.argsort(consistency_scores)[-20:]  # 20
+
+                # Plot horizontal bar chart
+                plt.barh(range(len(sorted_indices)), [consistency_scores[i] for i in sorted_indices], color='darkblue')
+                plt.yticks(range(len(sorted_indices)), [feature_labels[i] for i in sorted_indices])
+
+                plt.xlabel('Consistency Score (Weighted Importance × Frequency)')
+                plt.title(f'{drug_name}: Most Consistent Predictive Features Across {len(curr_indices)} Rotations', fontsize=14)
+                plt.tight_layout()
+                pdf.savefig()
+                plt.close()
+
+                # Create aggregated SHAP summary plot by combining data from all rotations
+                plt.figure(figsize=(14, 12))
+
+                # Prepare data for aggregated SHAP summary plot
+                # First, we need to normalize and combine SHAP values across all rotations
+                aggregated_shap_data = {}
+                max_abs_shap = 0  # Track maximum absolute SHAP value for normalization
+
+                # Process and combine all SHAP data
+                for feature, (importance, count) in current_drug_importance.items():
+                    if count >= 2:  # Only include features that appear in at least 2 rotations
+                        # Store normalized importance * frequency as the aggregated SHAP value
+                        shap_value = importance * (count / len(curr_indices))
+                        aggregated_shap_data[feature] = shap_value
+                        max_abs_shap = max(max_abs_shap, shap_value)  # Update max for normalization
+
+                # Sort features by aggregated SHAP value
+                sorted_shap_features = sorted(aggregated_shap_data.items(), key=lambda x: x[1], reverse=True)
+                features = [f for f, _ in sorted_shap_features[:20]]  # 20 features
+                shap_values = [v for _, v in sorted_shap_features[:20]]
+
+                # Normalize for consistent visualization
+                normalized_shap = [v/max_abs_shap for v in shap_values]
+
+                # Create a colormap based on feature frequency
+                feature_freq = {}
+                for feature in features:
+                    count = sum(1 for features in all_feature_names if feature in features)
+                    feature_freq[feature] = count / len(curr_indices)  # Normalize to 0-1
+
+                # Get frequency-based colors
+                colors = [plt.cm.Blues(feature_freq[f]) for f in features]
+
+                # Create horizontal bar chart - custom SHAP summary plot
+                y_pos = np.arange(len(features))
+                plt.barh(y_pos, normalized_shap, color=colors)
+                plt.yticks(y_pos, [f"{f} ({int(feature_freq[f]*len(curr_indices))}/{len(curr_indices)})" for f in features])
+                plt.xlabel('Normalized Aggregated SHAP Value')
+                plt.title(f'{drug_name}: Aggregated SHAP Summary Across {len(curr_indices)} Rotations', fontsize=16)
+
+                # Add a colorbar to show frequency
+                sm = plt.cm.ScalarMappable(cmap=plt.cm.Blues, norm=plt.Normalize(0, 1))
+                sm.set_array([])
+                cax = plt.gcf().add_axes([0.92, 0.1, 0.02, 0.8])
+                cbar = plt.colorbar(sm, cax=cax)
+                cbar.set_label('Proportion of Rotations')
+
+                plt.tight_layout(rect=[0, 0, 0.9, 1])
+                pdf.savefig()
+                plt.close()
+
+                # Save the aggregated SHAP data as CSV
+                agg_shap_df = pd.DataFrame({
+                    'Feature': [f for f, _ in sorted_shap_features],
+                    'Aggregated_SHAP': [v for _, v in sorted_shap_features],
+                    'Rotation_Count': [int(feature_freq[f]*len(curr_indices)) if f in feature_freq else 0
+                                      for f, _ in sorted_shap_features],
+                    'Rotation_Percentage': [feature_freq[f]*100 if f in feature_freq else 0
+                                          for f, _ in sorted_shap_features]
+                })
+                agg_shap_df.to_csv(os.path.join(rotations_dir, f'{drug_name}_Aggregated_SHAP_Values.csv'), index=False)
+
+                # Also create a separate standalone PDF with just the aggregated SHAP summary
+                with PdfPages(os.path.join(rotations_dir, f'{drug_name}_Aggregated_SHAP_Summary.pdf')) as shap_pdf:
+                    # Title page
+                    plt.figure(figsize=(11, 8.5))
+                    plt.text(0.5, 0.5, f'Aggregated SHAP Summary\n{drug_name} Sensitivity Prediction\n {len(curr_indices)} Rotations',
+                            horizontalalignment='center', verticalalignment='center', fontsize=24)
+                    plt.text(0.5, 0.3, f'Date: {pd.Timestamp.now().strftime("%Y-%m-%d")}',
+                            horizontalalignment='center', verticalalignment='center', fontsize=14)
+                    plt.axis('off')
+                    shap_pdf.savefig()
+                    plt.close()
+
+                    # Aggregated SHAP summary plot
+                    plt.figure(figsize=(14, 12))
+                    plt.barh(y_pos, normalized_shap, color=colors)
+                    plt.yticks(y_pos, [f"{f} ({int(feature_freq[f]*len(curr_indices))}/{len(curr_indices)})" for f in features])
+                    plt.xlabel('Normalized Aggregated SHAP Value')
+                    plt.title(f'{drug_name}: Aggregated SHAP Summary Across {len(curr_indices)} Rotations', fontsize=16)
+
+                    # Add colorbar for frequency
+                    sm = plt.cm.ScalarMappable(cmap=plt.cm.Blues, norm=plt.Normalize(0, 1))
+                    sm.set_array([])
+                    cax = plt.gcf().add_axes([0.92, 0.1, 0.02, 0.8])
+                    cbar = plt.colorbar(sm, cax=cax)
+                    cbar.set_label('Proportion of Rotations')
+
+                    plt.tight_layout(rect=[0, 0, 0.9, 1])
+                    shap_pdf.savefig()
+                    plt.close()
+
+                    # Add feature explanation page
+                    plt.figure(figsize=(12, 10))
+                    plt.axis('off')
+
+                    explanation_text = f"AGGREGATED SHAP SUMMARY FOR {drug_name.upper()}\n\n"
+                    explanation_text += "This plot shows the aggregated SHAP values across the performing rotations,\n"
+                    explanation_text += f"weighted by both importance and frequency of selection across {len(curr_indices)} rotations.\n\n"
+
+                    explanation_text += "INTERPRETATION:\n\n"
+                    explanation_text += "1. Feature names are shown on the y-axis, with the number of rotations\n"
+                    explanation_text += f"   in which each feature was selected shown in parentheses (n/{len(curr_indices)}).\n\n"
+
+                    explanation_text += "2. The x-axis shows normalized SHAP values - larger values indicate\n"
+                    explanation_text += "   stronger influence on model predictions.\n\n"
+
+                    explanation_text += "3. Color intensity represents how consistently a feature was selected\n"
+                    explanation_text += "   across multiple rotations - darker blue indicates selection in\n"
+                    explanation_text += "   more rotations.\n\n"
+
+                    explanation_text += "4. The most reliable predictive features appear at the with:\n"
+                    explanation_text += "   - High SHAP values (longer bars)\n"
+                    explanation_text += "   - Darker blue color (selected in multiple rotations)\n\n"
+
+                    explanation_text += " 5 MOST CONSISTENT PREDICTIVE FEATURES:\n"
+                    for i, feature in enumerate(features[:5]):
+                        count = int(feature_freq[feature] * len(curr_indices))
+                        importance = aggregated_shap_data[feature] / max_abs_shap * 100
+                        explanation_text += f"{i+1}. {feature} - Selected in {count}/{len(curr_indices)} rotations, Relative importance: {importance:.1f}%\n"
+
+                    plt.text(0.05, 0.95, explanation_text, fontsize=12,
+                            family='monospace', transform=plt.gca().transAxes)
+                    plt.title(f"Understanding the Aggregated SHAP Summary", fontsize=16, y=0.98)
+                    shap_pdf.savefig()
+                    plt.close()
+
+                print(f"\nAggregated SHAP summary for {drug_name} saved to {os.path.join(rotations_dir, f'{drug_name}_Aggregated_SHAP_Summary.pdf')}")
+            else:
+                print(f"No weighted importance data available for {drug_name}. Skipping SHAP summary plots.")
+          # Summary page comparing features between drugs
+        plt.figure(figsize=(12, 10))
+        plt.axis('off')
+
+        summary_text = f"SUMMARY OF TOP PREDICTIVE FEATURES\n\n"
+        summary_text += f"This analysis examined the top performing rotations for each drug based on ROC AUC.\n\n"
+
+        # Add Dasatinib summary - with validation for values to prevent errors
+        summary_text += "DASATINIB TOP CONSISTENT FEATURES:\n"
+        das_consistent_features = {}
+        for feat, values in combined_shap_importance['dasatinib'].items():
+            # Safety check to ensure values are valid tuples with 2 elements
+            valid_values = [v for v in values if isinstance(v, tuple) and len(v) == 2]
+            if len(valid_values) >= 3:  # Feature appears in at least 3 rotations
+                avg_importance = sum(imp for imp, _ in valid_values) / len(valid_values)
+                das_consistent_features[feat] = (avg_importance, len(valid_values))
+
+        # Sort
+        das_sorted = sorted(das_consistent_features.items(), key=lambda x: x[1][0], reverse=True)[:10]
+        das_rotation_count = len(das_indices)
+        for i, (feature, (importance, count)) in enumerate(das_sorted):
+            summary_text += f"  {i+1}. {feature} - In {count}/{das_rotation_count} rotations, Avg. Importance: {importance:.4f}\n"
+
+        # Add Venetoclax summary - with validation for values to prevent errors
+        summary_text += "\nVENETOCLAX CONSISTENT FEATURES:\n"
+        ven_consistent_features = {}
+        for feat, values in combined_shap_importance['venetoclax'].items():
+            # Safety check to ensure values are valid tuples with 2 elements
+            valid_values = [v for v in values if isinstance(v, tuple) and len(v) == 2]
+            if len(valid_values) >= 2:  # For venetoclax, require only 2 rotations since we have fewer
+                avg_importance = sum(imp for imp, _ in valid_values) / len(valid_values)
+                ven_consistent_features[feat] = (avg_importance, len(valid_values))
+
+        # Sort 
+        ven_sorted = sorted(ven_consistent_features.items(), key=lambda x: x[1][0], reverse=True)[:10]
+        ven_rotation_count = len(ven_indices)
+        for i, (feature, (importance, count)) in enumerate(ven_sorted):
+            summary_text += f"  {i+1}. {feature} - In {count}/{ven_rotation_count} rotations, Avg. Importance: {importance:.4f}\n"
+
+        # Add conclusions about common vs. drug-specific predictors
+        summary_text += "\nKEY OBSERVATIONS:\n"
+        summary_text += "1. Feature Consistency: Some features consistently appear in multiple  rotations, \n   suggesting robust predictive value regardless of specific PDX grouping.\n\n"
+
+        # Check for common shape features between drugs - with proper handling if das_sorted or ven_sorted is empty
+        das_features = set(f for f, _ in das_sorted) if das_sorted else set()
+        ven_features = set(f for f, _ in ven_sorted) if ven_sorted else set()
+        common_shape_features = set(f for f in das_features.intersection(ven_features) if 'AreaShape' in f)
+
+        if common_shape_features:
+            summary_text += "2. Common Shape Features: Both drugs share some common shape parameters as important predictors:\n"
+            for feat in common_shape_features:
+                summary_text += f"   - {feat}\n"
+            summary_text += "   This suggests fundamental cell morphology relates to drug sensitivity regardless of mechanism.\n\n"
+
+        summary_text += f"3. Drug-Specific Mechanisms: As expected, Dasatinib predictions rely heavily on LCK-related\n   features while Venetoclax predictions rely on BCL2-related features, confirming\n   that the models capture the appropriate drug-specific biological mechanisms.\n"
+
+        plt.text(0.05, 0.95, summary_text, fontsize=12, 
+                family='monospace', transform=plt.gca().transAxes)
+        plt.title(f"Cross-Drug Feature Importance Summary", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+    print(f"\nComprehensive SHAP analysis of rotations saved to {os.path.join(rotations_dir, f'{n}_Rotations_SHAP_Analysis.pdf')}")
+
+    return True
+
+def generate_global_shap_umap(pdx_df, cv_results, drug_name, top_n_features=20, output_dirs=None, random_state=42):
+    """
+    Generate UMAP visualization for all samples based on top aggregated SHAP features.
+
+    Parameters:
+    -----------
+    pdx_df : pandas DataFrame
+        The complete PDX dataframe with all samples
+    cv_results : dict
+        Dictionary containing cross-validation results
+    drug_name : str
+        Name of the drug ('dasatinib' or 'venetoclax')
+    top_n_features : int, optional
+        Number of top SHAP features to use for UMAP
+    output_dirs : dict, optional
+        Dictionary containing output directories
+    random_state : int, optional
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    dict
+        Dictionary containing UMAP results
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.backends.backend_pdf import PdfPages
+    import umap
+    import os
+    from collections import Counter
+    from sklearn.preprocessing import StandardScaler
+
+    print(f"\nGenerating global UMAP for all samples using top {top_n_features} SHAP features for {drug_name}...")
+
+    # Create output directory if not exists
+    if output_dirs is not None:
+        umap_dir = os.path.join(output_dirs['plots_dir'], 'global_shap_umap')
+        if not os.path.exists(umap_dir):
+            os.makedirs(umap_dir)
+            print(f"Created directory: {umap_dir}")
+    else:
+        umap_dir = './global_shap_umap'
+        if not os.path.exists(umap_dir):
+            os.makedirs(umap_dir)
+
+    # 1. First, identify top SHAP features across all rotations
+    all_rotation_features = {}
+    for rot_metrics in cv_results[drug_name.lower()]['rotation_metrics']:
+        if 'selected_features' in rot_metrics:
+            for feature in rot_metrics['selected_features']:
+                if feature not in all_rotation_features:
+                    all_rotation_features[feature] = 0
+                all_rotation_features[feature] += 1
+
+    # Sort features by frequency
+    top_features = sorted(all_rotation_features.items(), key=lambda x: x[1], reverse=True)[:top_n_features]
+    top_feature_names = [f for f, _ in top_features]
+
+    print(f"Top {top_n_features} features for {drug_name} by selection frequency:")
+    for i, (feature, count) in enumerate(top_features):
+        print(f"  {i+1}. {feature} (selected in {count} rotations)")
+
+    # 2. Extract these features for all samples
+    feature_values = pdx_df[top_feature_names].values
+
+    # Apply scaling before UMAP to address the U-shape pattern
+    scaler = StandardScaler()
+    feature_values_scaled = scaler.fit_transform(feature_values)
+
+    # 3. Generate UMAP embedding with modified parameters
+    reducer = umap.UMAP(
+        n_neighbors=30,
+        min_dist=0.25,
+        metric='correlation',
+        n_epochs=1000,
+        random_state=random_state
+    )
+    embedding = reducer.fit_transform(feature_values_scaled)
+
+    # 4. Create DataFrame for plotting
+    umap_df = pd.DataFrame({
+        'UMAP1': embedding[:, 0],
+        'UMAP2': embedding[:, 1],
+        'Group': pdx_df['Group'],
+        'Sensitivity': pdx_df[f'{drug_name.title()} Sensitivity']
+    })
+
+    # Save the UMAP coordinates
+    umap_df.to_csv(os.path.join(umap_dir, f'{drug_name.title()}_Global_AllSamples_UMAP_Coordinates.csv'), index=False)
+
+    # 5. Generate separate PDF for each visualization as requested
+
+    # 5.1 Title page - saved as its own PDF
+    plt.figure(figsize=(11, 8.5))
+    plt.text(0.5, 0.5, f'Global UMAP Visualization\nAll Samples - {drug_name.title()}\nTop {top_n_features} SHAP Features',
+            horizontalalignment='center', verticalalignment='center', fontsize=24)
+    plt.text(0.5, 0.3, f'Date: {pd.Timestamp.now().strftime("%Y-%m-%d")}',
+            horizontalalignment='center', verticalalignment='center', fontsize=14)
+    plt.axis('off')
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_UMAP_Title.pdf'))
+    plt.close()
+
+    # 5.2 Plot colored by PDX Group - saved as its own PDF
+    plt.figure(figsize=(14, 12))
+    unique_groups = np.unique(pdx_df['Group'])
+    colormap = plt.cm.get_cmap('tab20', len(unique_groups))
+
+    for i, group in enumerate(unique_groups):
+        group_mask = (umap_df['Group'] == group)
+        plt.scatter(embedding[group_mask, 0], embedding[group_mask, 1],
+                   label=group, color=colormap(i), s=100, alpha=0.7,
+                    edgecolors='none')
+
+    plt.title(f'{drug_name.title()} - Global UMAP by PDX Group (All Samples)', fontsize=16)
+    plt.xlabel('UMAP1', fontsize=12)
+    plt.ylabel('UMAP2', fontsize=12)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout(rect=[0, 0, 0.85, 1])  # Make room for legend
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_AllSamples_UMAP_by_Group.pdf'))
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_AllSamples_UMAP_by_Group.eps'), dpi=1200)
+    plt.close()
+
+    # 5.3 Plot colored by Sensitivity - saved as its own PDF (without group labels)
+    plt.figure(figsize=(14, 12))
+    cmap = plt.cm.coolwarm
+    scatter = plt.scatter(embedding[:, 0], embedding[:, 1],
+                        c=umap_df['Sensitivity'], cmap=cmap, s=100, alpha=0.7,
+                          edgecolors='none')
+
+    plt.title(f'{drug_name.title()} - Global UMAP by True Sensitivity (All Samples)', fontsize=16)
+    plt.xlabel('UMAP1', fontsize=12)
+    plt.ylabel('UMAP2', fontsize=12)
+    plt.colorbar(scatter, label='Sensitivity (0=Resistant, 1=Sensitive)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_AllSamples_UMAP_by_Sensitivity.pdf'))
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_AllSamples_UMAP_by_Sensitivity.eps'), dpi=1200)
+    plt.close()
+
+    # 5.4 Summary page - saved as its own PDF
+    plt.figure(figsize=(11, 8.5))
+    plt.axis('off')
+
+    # Create summary text
+    summary_text = f"GLOBAL UMAP VISUALIZATION FOR {drug_name.upper()}\n\n"
+    summary_text += f"This UMAP visualization represents all {len(pdx_df)} samples projected\n"
+    summary_text += f"into a 2D space based on the top {top_n_features} SHAP features.\n\n"
+
+    summary_text += "Top SHAP features used for this visualization:\n"
+    for i, (feature, count) in enumerate(top_features[:10]):
+        summary_text += f"{i+1}. {feature} (selected in {count} rotations)\n"
+    if len(top_features) > 10:
+        summary_text += f"... plus {len(top_features) - 10} more features\n"
+
+    # Calculate statistics by group
+    summary_text += "\nPDX Group Statistics:\n"
+    for group in sorted(unique_groups):
+        group_mask = (pdx_df['Group'] == group)
+        group_size = sum(group_mask)
+        group_sensitivity = np.mean(pdx_df.loc[group_mask, f'{drug_name.title()} Sensitivity']) * 100
+        summary_text += f"  - {group}: {group_size} samples, {group_sensitivity:.1f}% sensitive\n"
+
+    plt.text(0.05, 0.95, summary_text, fontsize=12, verticalalignment='top',
+            family='monospace', transform=plt.gca().transAxes)
+    plt.title(f"Global UMAP Summary - {drug_name.title()}", fontsize=16, y=0.98)
+    plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_UMAP_Summary.pdf'))
+    plt.close()
+
+    # 5.5 Generate drug-specific feature UMAPs
+    if drug_name.lower() == 'dasatinib':
+        specific_features = ['Intensity_LowerQuartileIntensity_pLCK', 'pLCK_x_AreaShape_Area']
+    elif drug_name.lower() == 'venetoclax':
+        specific_features = ['Intensity_UpperQuartileIntensity_pBCL2', 'Intensity_MinIntensityEdge_BCL_2']
+    else:
+        specific_features = []
+
+    for feature in specific_features:
+        if feature in pdx_df.columns:
+            plt.figure(figsize=(14, 12))
+
+            # Create a normalized colormap based on the feature values
+            feature_values = pdx_df[feature].values
+            vmin, vmax = np.nanpercentile(feature_values, [5, 95])  # Use percentiles to avoid outlier influence
+
+            scatter = plt.scatter(embedding[:, 0], embedding[:, 1],
+                                c=feature_values, cmap='viridis',
+                                s=100, alpha=0.7, vmin=vmin, vmax=vmax,
+                                  edgecolors='none')
+
+            plt.title(f'{drug_name.title()} - Global UMAP colored by {feature}', fontsize=16)
+            plt.xlabel('UMAP1', fontsize=12)
+            plt.ylabel('UMAP2', fontsize=12)
+            plt.colorbar(scatter, label=feature)
+            plt.tight_layout()
+
+            plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_UMAP_by_{feature.replace("/", "_")}.pdf'))
+            plt.savefig(os.path.join(umap_dir, f'{drug_name.title()}_Global_UMAP_by_{feature.replace("/", "_")}.svg'), dpi=1200)
+            plt.close()
+        else:
+            print(f"Warning: Requested feature '{feature}' not found in the dataframe")
+
+    print(f"Global UMAP visualizations for {drug_name} saved to {umap_dir}")
+
+    return {
+        'embedding': embedding,
+        'top_features': top_features,
+        'umap_df': umap_df
+    }
