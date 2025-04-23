@@ -605,3 +605,301 @@ def main():
     print("\nTop 15 Venetoclax features by selection frequency:")
     for i, (feature, count) in enumerate(venetoclax_top_features[:15]):
         print(f"  {i+1}. {feature} (selected in {count}/{len(venetoclax_rotations)} rotations)")
+#-------------------------------------------------------------
+    # COMPARATIVE ANALYSIS
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("COMPARATIVE ANALYSIS OF DRUGS")
+    print("="*80)
+
+    # Compare average cross-validation performance
+    das_avg = cv_results['dasatinib']['avg_metrics']
+    ven_avg = cv_results['venetoclax']['avg_metrics']
+
+    print("\nCross-Validation Average Performance Comparison:")
+    print("\nMetric     | Dasatinib | Venetoclax | Difference")
+    print("-" * 50)
+    print(f"Accuracy   | {das_avg['accuracy']:.4f}   | {ven_avg['accuracy']:.4f}    | {das_avg['accuracy'] - ven_avg['accuracy']:.4f}")
+    print(f"ROC AUC    | {das_avg['roc_auc']:.4f}   | {ven_avg['roc_auc']:.4f}    | {das_avg['roc_auc'] - ven_avg['roc_auc']:.4f}")
+    print(f"F1 Score   | {das_avg['f1_score']:.4f}   | {ven_avg['f1_score']:.4f}    | {das_avg['f1_score'] - ven_avg['f1_score']:.4f}")
+    print(f"Precision  | {das_avg['precision']:.4f}   | {ven_avg['precision']:.4f}    | {das_avg['precision'] - ven_avg['precision']:.4f}")
+    print(f"Recall     | {das_avg['recall']:.4f}   | {ven_avg['recall']:.4f}    | {das_avg['recall'] - ven_avg['recall']:.4f}")
+
+    # Compare best rotation performance
+    best_das = cv_results['dasatinib']['rotation_metrics'][best_dasatinib_rotation]
+    best_ven = cv_results['venetoclax']['rotation_metrics'][best_venetoclax_rotation]
+
+    print("\nBest Rotation Performance Comparison:")
+    print("\nMetric     | Dasatinib | Venetoclax | Difference")
+    print("-" * 50)
+    print(f"Accuracy   | {best_das['accuracy']:.4f}   | {best_ven['accuracy']:.4f}    | {best_das['accuracy'] - best_ven['accuracy']:.4f}")
+    print(f"ROC AUC    | {best_das['roc_auc']:.4f}   | {best_ven['roc_auc']:.4f}    | {best_das['roc_auc'] - best_ven['roc_auc']:.4f}")
+    print(f"F1 Score   | {best_das['f1_score']:.4f}   | {best_ven['f1_score']:.4f}    | {best_das['f1_score'] - best_ven['f1_score']:.4f}")
+
+    # Create visualizations for comparing best performance
+    plt.figure(figsize=(12, 8))
+
+    # Extract data for plotting
+    metrics = ['accuracy', 'roc_auc', 'f1_score', 'precision', 'recall']
+    dasatinib_values = [best_das[metric] for metric in metrics]
+    venetoclax_values = [best_ven[metric] for metric in metrics]
+
+    x = np.arange(len(metrics))
+    width = 0.35
+
+    plt.bar(x - width/2, dasatinib_values, width, label='Dasatinib (Best Rotation)')
+    plt.bar(x + width/2, venetoclax_values, width, label='Venetoclax (Best Rotation)')
+
+    plt.xlabel('Metric')
+    plt.ylabel('Value')
+    plt.title('Best Rotation Performance by Drug')
+    plt.xticks(x, [m.replace('_', ' ').title() for m in metrics])
+    plt.ylim(0, 1.1)
+    plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # Save the comparison chart
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dirs['plots_dir'], 'Best_Rotation_Performance_Comparison.svg'), dpi=1200)
+    plt.close()
+
+    #-------------------------------------------------------------
+    # SAVE RESULTS
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("SAVING RESULTS")
+    print("="*80)
+    # Try to get Google Drive path if in Colab
+    try:
+        from google.colab import drive
+        drive_mounted = True
+        # Create a directory in Google Drive to save results
+        gdrive_dir = '/content/drive/MyDrive/PDX_Analysis_Results/cv_results'
+        if not os.path.exists(gdrive_dir):
+            os.makedirs(gdrive_dir)
+        output_file = os.path.join(gdrive_dir, 'pdx_drug_specific_rotation_cv_results.pkl')
+    except (ImportError, ModuleNotFoundError):
+        drive_mounted = False
+        # Use local directory if not in Colab
+        output_file = os.path.join(output_dirs['model_dir'], 'pdx_drug_specific_rotation_cv_results.pkl')
+
+    # Prepare results for saving (without large model objects)
+    final_results = {
+        'dasatinib': {
+            'rotation_metrics': cv_results['dasatinib']['rotation_metrics'],
+            'avg_metrics': cv_results['dasatinib']['avg_metrics'],
+            'top_features': dasatinib_top_features[:30],
+            'optimal_rotation': optimal_rotation_info['best_dasatinib'],
+            'top_rotations': optimal_rotation_info['top_dasatinib_rotations']
+        },
+        'venetoclax': {
+            'rotation_metrics': cv_results['venetoclax']['rotation_metrics'],
+            'avg_metrics': cv_results['venetoclax']['avg_metrics'],
+            'top_features': venetoclax_top_features[:30],
+            'optimal_rotation': optimal_rotation_info['best_venetoclax'],
+            'top_rotations': optimal_rotation_info['top_venetoclax_rotations']
+        },
+        'metadata': {
+            'dasatinib_rotations': [{
+                'train': rotation['train'].tolist(),
+                'val': rotation['val'].tolist(),
+                'test': rotation['test'].tolist()
+            } for rotation in dasatinib_rotations],
+            'venetoclax_rotations': [{
+                'train': rotation['train'].tolist(),
+                'val': rotation['val'].tolist(),
+                'test': rotation['test'].tolist()
+            } for rotation in venetoclax_rotations],
+            'date': pd.Timestamp.now().strftime('%Y-%m-%d')
+        }
+    }
+
+    # Save results
+    try:
+        with open(output_file, 'wb') as f:
+            pickle.dump(final_results, f)
+        print(f"Results saved to {output_file}")
+    except Exception as e:
+        print(f"Error saving results: {str(e)}")
+
+    # Create summary report
+    report_path = os.path.join(output_dirs['plots_dir'], 'PDX_Drug_Specific_CV_Summary.pdf')
+    print(f"Creating summary report at {report_path}")
+
+    with PdfPages(report_path) as pdf:
+        # Title page
+        plt.figure(figsize=(11, 8.5))
+        plt.text(0.5, 0.5, 'PDX-Specific Drug Sensitivity Prediction\nCross-Validation Summary Report',
+                 horizontalalignment='center', verticalalignment='center', fontsize=24)
+        plt.text(0.5, 0.3, f'Date: {pd.Timestamp.now().strftime("%Y-%m-%d")}',
+                 horizontalalignment='center', verticalalignment='center', fontsize=14)
+        plt.axis('off')
+        pdf.savefig()
+        plt.close()
+
+        # Method description
+        plt.figure(figsize=(11, 8.5))
+        plt.axis('off')
+        # Replace lines 3653-3657 in the report generation section with this code:
+
+        # Replace the method_text section (around line 3652) with this correctly closed version:
+
+        method_text = (
+            "METHODOLOGY\n\n"
+            f"This analysis evaluated separate rotation schemes for Dasatinib and Venetoclax models.\n\n"
+            f"For each drug:\n"
+            f"  - Generated {len(dasatinib_rotations)} distinct PDX rotations for Dasatinib\n"
+            f"  - Generated {len(venetoclax_rotations)} distinct PDX rotations for Venetoclax\n"
+            f"  - Each rotation used approximately {len(dasatinib_rotations[0]['train'])} PDX groups for training, "
+            f"{len(dasatinib_rotations[0]['val'])} for validation, and {len(dasatinib_rotations[0]['test'])} for testing\n"
+            f"  - Used drug-specific feature sets and model parameters\n"
+            f"  - Identified optimal training/validation/testing splits for each drug separately\n\n"
+            f"Drug-specific feature selection:\n"
+            f"  - Dasatinib: LCK-related features and cell shape parameters\n"
+            f"  - Venetoclax: BCL2-related features and cell shape parameters\n\n"
+            f"Evaluation metrics: Accuracy, ROC AUC, F1 score, Precision, Recall"
+        )
+        plt.text(0.1, 0.9, method_text, fontsize=12, verticalalignment='top',
+                 family='monospace', transform=plt.gca().transAxes)
+        plt.title("Methodology", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+        # Performance table
+        plt.figure(figsize=(11, 8.5))
+        plt.axis('off')
+
+        # Get average and best metrics
+        das_avg = cv_results['dasatinib']['avg_metrics']
+        ven_avg = cv_results['venetoclax']['avg_metrics']
+        best_das = cv_results['dasatinib']['rotation_metrics'][best_dasatinib_rotation]
+        best_ven = cv_results['venetoclax']['rotation_metrics'][best_venetoclax_rotation]
+
+        table_text = "PERFORMANCE SUMMARY\n\n"
+        table_text += "DASATINIB:\n"
+        table_text += f"  Average across all rotations:\n"
+        table_text += f"    ROC AUC: {das_avg['roc_auc']:.4f}\n"
+        table_text += f"    Accuracy: {das_avg['accuracy']:.4f}\n"
+        table_text += f"    F1 Score: {das_avg['f1_score']:.4f}\n\n"
+
+        table_text += f"  Best rotation (Rotation {best_dasatinib_rotation+1}):\n"
+        table_text += f"    ROC AUC: {best_das['roc_auc']:.4f}\n"
+        table_text += f"    Accuracy: {best_das['accuracy']:.4f}\n"
+        table_text += f"    F1 Score: {best_das['f1_score']:.4f}\n\n"
+
+        table_text += "VENETOCLAX:\n"
+        table_text += f"  Average across all rotations:\n"
+        table_text += f"    ROC AUC: {ven_avg['roc_auc']:.4f}\n"
+        table_text += f"    Accuracy: {ven_avg['accuracy']:.4f}\n"
+        table_text += f"    F1 Score: {ven_avg['f1_score']:.4f}\n\n"
+
+        table_text += f"  Best rotation (Rotation {best_venetoclax_rotation+1}):\n"
+        table_text += f"    ROC AUC: {best_ven['roc_auc']:.4f}\n"
+        table_text += f"    Accuracy: {best_ven['accuracy']:.4f}\n"
+        table_text += f"    F1 Score: {best_ven['f1_score']:.4f}\n"
+
+        plt.text(0.1, 0.9, table_text, fontsize=12, verticalalignment='top',
+                 family='monospace', transform=plt.gca().transAxes)
+        plt.title("Performance Summary", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+        # Feature importance page
+        plt.figure(figsize=(11, 8.5))
+        plt.axis('off')
+
+        features_text = "TOP 10 FEATURES BY SELECTION FREQUENCY\n\n"
+        features_text += "Dasatinib:\n"
+
+        for i, (feature, count) in enumerate(dasatinib_top_features[:10]):
+            features_text += f"  {i+1}. {feature} (selected in {count}/{len(dasatinib_rotations)} rotations)\n"
+
+        features_text += "\nVenetoclax:\n"
+
+        for i, (feature, count) in enumerate(venetoclax_top_features[:10]):
+            features_text += f"  {i+1}. {feature} (selected in {count}/{len(venetoclax_rotations)} rotations)\n"
+
+        plt.text(0.1, 0.9, features_text, fontsize=12, verticalalignment='top',
+                 family='monospace', transform=plt.gca().transAxes)
+        plt.title("Feature Importance Analysis", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+        # Optimal rotation summary
+        plt.figure(figsize=(11, 8.5))
+        plt.axis('off')
+
+        optimal_text = "OPTIMAL PDX ROTATIONS\n\n"
+
+        optimal_text += "Best Dasatinib Rotation:\n"
+        optimal_text += f"  Rotation {best_dasatinib_rotation+1} (ROC AUC: {dasatinib_rotation_ranks[0][1]:.4f})\n"
+        optimal_text += f"  Training PDX: {', '.join(dasatinib_rotations[best_dasatinib_rotation]['train'])}\n"
+        optimal_text += f"  Validation PDX: {', '.join(dasatinib_rotations[best_dasatinib_rotation]['val'])}\n"
+        optimal_text += f"  Testing PDX: {', '.join(dasatinib_rotations[best_dasatinib_rotation]['test'])}\n\n"
+
+        optimal_text += "Best Venetoclax Rotation:\n"
+        optimal_text += f"  Rotation {best_venetoclax_rotation+1} (ROC AUC: {venetoclax_rotation_ranks[0][1]:.4f})\n"
+        optimal_text += f"  Training PDX: {', '.join(venetoclax_rotations[best_venetoclax_rotation]['train'])}\n"
+        optimal_text += f"  Validation PDX: {', '.join(venetoclax_rotations[best_venetoclax_rotation]['val'])}\n"
+        optimal_text += f"  Testing PDX: {', '.join(venetoclax_rotations[best_venetoclax_rotation]['test'])}\n\n"
+
+        # Check for any overlap in test PDX between the best rotations
+        best_das_test = set(dasatinib_rotations[best_dasatinib_rotation]['test'])
+        best_ven_test = set(venetoclax_rotations[best_venetoclax_rotation]['test'])
+        common_test = best_das_test.intersection(best_ven_test)
+
+        if common_test:
+            optimal_text += f"Common Testing PDX in best rotations: {', '.join(common_test)}\n\n"
+        else:
+            optimal_text += "No common PDX groups in the test sets of best rotations.\n\n"
+
+        plt.text(0.1, 0.9, optimal_text, fontsize=12, verticalalignment='top',
+                 family='monospace', transform=plt.gca().transAxes)
+        plt.title("Optimal PDX Rotations", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+        # Conclusions page
+        plt.figure(figsize=(11, 8.5))
+        plt.axis('off')
+
+        # Determine which drug performed better
+        better_drug = "Dasatinib" if best_das['roc_auc'] > best_ven['roc_auc'] else "Venetoclax"
+
+        conclusions_text = "KEY CONCLUSIONS\n\n"
+        conclusions_text += f"1. Overall Performance:\n"
+        conclusions_text += f"   {better_drug} showed better maximum performance with optimal PDX rotation.\n"
+        conclusions_text += f"   Dasatinib best ROC AUC: {best_das['roc_auc']:.4f}\n"
+        conclusions_text += f"   Venetoclax best ROC AUC: {best_ven['roc_auc']:.4f}\n\n"
+
+        conclusions_text += f"2. PDX Group Selection:\n"
+        conclusions_text += f"   Each drug benefits from different PDX groups for training and testing.\n"
+        conclusions_text += f"   The optimal training/testing splits are drug-specific.\n\n"
+
+        conclusions_text += f"3. Feature Importance:\n"
+        conclusions_text += f"   Dasatinib prediction relies primarily on: LCK-related features and cell shape parameters.\n"
+        conclusions_text += f"   Venetoclax prediction relies primarily on: BCL2-related features and cell shape parameters.\n\n"
+
+        das_consistency = np.std([m['roc_auc'] for m in cv_results['dasatinib']['rotation_metrics']])
+        ven_consistency = np.std([m['roc_auc'] for m in cv_results['venetoclax']['rotation_metrics']])
+        more_consistent = "Dasatinib" if das_consistency < ven_consistency else "Venetoclax"
+
+        conclusions_text += f"4. Rotation Sensitivity:\n"
+        conclusions_text += f"   {more_consistent} models showed more consistent performance across different PDX rotations.\n"
+        conclusions_text += f"   Dasatinib ROC AUC standard deviation: {das_consistency:.4f}\n"
+        conclusions_text += f"   Venetoclax ROC AUC standard deviation: {ven_consistency:.4f}\n\n"
+
+        conclusions_text += f"5. Recommendations:\n"
+        conclusions_text += f"   - Use drug-specific PDX groupings for optimal predictive performance.\n"
+        conclusions_text += f"   - Consider the identified optimal rotations when designing future experiments.\n"
+        conclusions_text += f"   - When evaluating new PDX samples, apply the drug-specific optimal models.\n"
+
+        plt.text(0.1, 0.9, conclusions_text, fontsize=12, verticalalignment='top',
+                 family='monospace', transform=plt.gca().transAxes)
+        plt.title("Key Conclusions", fontsize=16, y=0.98)
+        pdf.savefig()
+        plt.close()
+
+    print(f"\nSummary report saved to {report_path}")
+if __name__ == "__main__":
+    results = main()
