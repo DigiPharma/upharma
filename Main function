@@ -1,0 +1,221 @@
+#=====================================================================
+MAIN FUNCTION WITH PDX-FOCUSED CROSS-VALIDATION
+#=====================================================================
+
+def main():
+    start_time = time.time()
+
+    # Try to mount Google Drive for Colab
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive')
+        print("Google Drive mounted successfully")
+        using_colab = True
+    except (ImportError, ModuleNotFoundError):
+        print("Not running in Colab or drive module not available")
+        using_colab = False
+
+    # Define output directories - SAVE TO GOOGLE DRIVE
+    if using_colab:
+        # Change this base path to your desired Google Drive folder
+        base_drive_path = '/content/drive/MyDrive/PDX_Analysis_Results_New042025/'
+    else:
+        base_drive_path = './'  # Local path if not using Colab
+
+    output_dirs = {
+        'model_dir': os.path.join(base_drive_path, 'xgboost_pdx_cv'),
+        'plots_dir': os.path.join(base_drive_path, 'plots_pdf'),
+        'data_dir': os.path.join(base_drive_path, 'data_csv')
+    }
+
+    # Create all directories
+    for dir_name, dir_path in output_dirs.items():
+        create_output_directory(dir_path)
+
+    # File path - Try to load from Google Drive if available
+    if using_colab:
+        # Change this path to your input file location on Drive
+        file_path = '/content/drive/MyDrive/DMF_Pharmacotyping/data_combined_all_032725.csv'
+    else:
+        file_path = 'data_combined_all.csv'  # Local path
+
+    # Load the data
+    try:
+        df = pd.read_csv(file_path)
+        print(f"Dataset loaded with shape: {df.shape}")
+    except FileNotFoundError:
+        print(f"File not found at: {file_path}")
+        return
+
+    df['Group'] = df['Group'].astype(str)
+    # Define cell line samples based on information
+    cell_line_names = ['CEM', 'HSB', 'KOPT', 'RPMI8402', 'LOUCY', 'MOLT4', 'DND41']
+
+    # Apply the function to determine sample types
+    df['Sample_Type'] = df['Group'].apply(lambda x: determine_sample_type(x, cell_line_names))
+
+    # Display counts of each sample type
+    print("\nSample type distribution:")
+    print(df['Sample_Type'].value_counts())
+
+    # Filter to only PDX samples
+    pdx_df = df[df['Sample_Type'] == 'PDX'].copy()
+    print(f"\nPDX samples selected: {pdx_df.shape[0]} rows")
+
+    # Get unique PDX groups
+    pdx_groups = pdx_df['Group'].astype(str).unique()
+    print(f"\nFound {len(pdx_groups)} unique PDX groups: {', '.join(pdx_groups)}")
+
+    if len(pdx_groups) != 14:
+        print(f"WARNING: Expected 14 PDX groups but found {len(pdx_groups)}. Will continue with available groups.")
+
+    #-------------------------------------------------------------
+    # ENHANCED FEATURE ENGINEERING
+    #-------------------------------------------------------------
+    print("\n" + "="*80)
+    print("ENHANCED FEATURE ENGINEERING")
+    print("="*80)
+
+    # Handle missing and infinite values
+    pdx_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Only handle missing values for categorical columns, leave numeric NaNs for XGBoost
+    categorical_cols = pdx_df.select_dtypes(exclude=np.number).columns
+    for col in categorical_cols:
+        if pdx_df[col].isnull().any():
+            pdx_df[col].fillna('Unknown', inplace=True)
+
+    # Basic ratio features (keeping original implementation)
+    pdx_df['pLCK_to_LCK_ratio'] = np.divide(
+        pdx_df['Intensity_MeanIntensity_pLCK'].values,
+        pdx_df['Intensity_MeanIntensity_LCK'].values,
+        out=np.zeros_like(pdx_df['Intensity_MeanIntensity_pLCK'].values, dtype=float),
+        where=pdx_df['Intensity_MeanIntensity_LCK'].values!=0
+    )
+    pdx_df['pBCL2_to_BCL2_ratio'] = np.divide(
+        pdx_df['Intensity_MeanIntensity_pBCL2'].values,
+        pdx_df['Intensity_MeanIntensity_BCL_2'].values,
+        out=np.zeros_like(pdx_df['Intensity_MeanIntensity_pBCL2'].values, dtype=float),
+        where=pdx_df['Intensity_MeanIntensity_BCL_2'].values!=0
+    )
+
+    # Enhanced features - log transformations (adding small constant to avoid log(0))
+    pdx_df['log_pLCK'] = np.log1p(pdx_df['Intensity_MeanIntensity_pLCK'])
+    pdx_df['log_LCK'] = np.log1p(pdx_df['Intensity_MeanIntensity_LCK'])
+    pdx_df['log_pBCL2'] = np.log1p(pdx_df['Intensity_MeanIntensity_pBCL2'])
+    pdx_df['log_BCL2'] = np.log1p(pdx_df['Intensity_MeanIntensity_BCL_2'])
+    # Log ratios (can capture different patterns than direct ratios)
+    pdx_df['log_pLCK_to_LCK_ratio'] = pdx_df['log_pLCK'] - pdx_df['log_LCK']
+    pdx_df['log_pBCL2_to_BCL2_ratio'] = pdx_df['log_pBCL2'] - pdx_df['log_BCL2']
+
+    # Square and square root transformations to capture non-linear relationships
+    pdx_df['pLCK_squared'] = np.square(pdx_df['Intensity_MeanIntensity_pLCK'])
+    pdx_df['pBCL2_squared'] = np.square(pdx_df['Intensity_MeanIntensity_pBCL2'])
+    pdx_df['pLCK_sqrt'] = np.sqrt(np.maximum(0, pdx_df['Intensity_MeanIntensity_pLCK']))
+    pdx_df['pBCL2_sqrt'] = np.sqrt(np.maximum(0, pdx_df['Intensity_MeanIntensity_pBCL2']))
+
+    # Z-scores for pLCK and pBCL2 within each PDX group
+    for group in pdx_df['Group'].unique():
+        group_mask = pdx_df['Group'] == group
+        if sum(group_mask) > 1:  # Only standardize if we have multiple samples
+            pdx_df.loc[group_mask, 'pLCK_zscore'] = safe_standardize(pdx_df.loc[group_mask, 'Intensity_MeanIntensity_pLCK'])
+            pdx_df.loc[group_mask, 'pBCL2_zscore'] = safe_standardize(pdx_df.loc[group_mask, 'Intensity_MeanIntensity_pBCL2'])
+
+    # Fill any missing z-scores with 0 (representing the mean)
+    if 'pLCK_zscore' not in pdx_df.columns:
+        pdx_df['pLCK_zscore'] = 0
+    else:
+        pdx_df['pLCK_zscore'].fillna(0, inplace=True)
+
+    if 'pBCL2_zscore' not in pdx_df.columns:
+        pdx_df['pBCL2_zscore'] = 0
+    else:
+        pdx_df['pBCL2_zscore'].fillna(0, inplace=True)
+    # Create interaction features between key proteins and important shape features
+    # First, identify top shape features that might interact with protein markers
+    shape_features = [col for col in pdx_df.columns if 'AreaShape' in col]
+
+    # Select a subset of shape features to avoid feature explosion
+    key_shape_features = [
+        'AreaShape_Area', 'AreaShape_Perimeter',
+        'AreaShape_FormFactor', 'AreaShape_Eccentricity',
+        'AreaShape_Solidity', 'AreaShape_Extent'
+    ]
+
+    # Filter to only use shape features that exist in the data
+    key_shape_features = [f for f in key_shape_features if f in pdx_df.columns]
+
+    # Create interaction features between key proteins and shape features
+    for shape_feat in key_shape_features:
+        if shape_feat in pdx_df.columns:
+            # For pLCK
+            pdx_df[f'pLCK_x_{shape_feat}'] = pdx_df['Intensity_MeanIntensity_pLCK'] * pdx_df[shape_feat]
+            pdx_df[f'pLCK_ratio_x_{shape_feat}'] = pdx_df['pLCK_to_LCK_ratio'] * pdx_df[shape_feat]
+
+            # For pBCL2
+            pdx_df[f'pBCL2_x_{shape_feat}'] = pdx_df['Intensity_MeanIntensity_pBCL2'] * pdx_df[shape_feat]
+            pdx_df[f'pBCL2_ratio_x_{shape_feat}'] = pdx_df['pBCL2_to_BCL2_ratio'] * pdx_df[shape_feat]
+
+    # Replace any infinity values with NaN
+    pdx_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Define clean feature sets for each drug (no cross-contamination)
+    lck_features_clean = [col for col in pdx_df.columns if 'LCK' in col.upper() and 'BCL' not in col.upper()]
+
+    # Enhanced LCK features - only include those related to LCK not BCL2
+    lck_enhanced_features_clean = [
+        col for col in [
+            'log_pLCK', 'log_LCK', 'log_pLCK_to_LCK_ratio',
+            'pLCK_squared', 'pLCK_sqrt', 'pLCK_zscore', 'pLCK_to_LCK_ratio'
+        ] if col in pdx_df.columns
+    ]
+
+    # LCK interaction features - only those related to LCK not BCL2
+    lck_interaction_features_clean = [
+        col for col in pdx_df.columns
+        if ('pLCK_x_' in col or 'pLCK_ratio_x_' in col) and 'BCL' not in col.upper()
+    ]
+
+    # BCL2/pBCL2 features and shape features for Venetoclax - exclude LCK features
+    bcl2_features_clean = [col for col in pdx_df.columns if ('BCL' in col.upper() or 'pBCL2' in col) and 'LCK' not in col.upper()]
+
+    # Enhanced BCL2 features - only include those related to BCL2 not LCK
+    bcl2_enhanced_features_clean = [
+        col for col in [
+            'log_pBCL2', 'log_BCL2', 'log_pBCL2_to_BCL2_ratio',
+            'pBCL2_squared', 'pBCL2_sqrt', 'pBCL2_zscore', 'pBCL2_to_BCL2_ratio'
+        ] if col in pdx_df.columns
+    ]
+
+    # BCL2 interaction features - only those related to BCL2 not LCK
+    bcl2_interaction_features_clean = [
+        col for col in pdx_df.columns
+        if ('pBCL2_x_' in col or 'pBCL2_ratio_x_' in col) and 'LCK' not in col.upper()
+    ]
+    # Shape features remain the same for both
+    shape_features = [col for col in pdx_df.columns if 'AreaShape' in col]
+
+    # Final clean feature sets for each drug (no cross-contamination)
+    dasatinib_features = list(set(lck_features_clean + lck_enhanced_features_clean + lck_interaction_features_clean + shape_features))
+    from collections import Counter
+    dups = [item for item, count in Counter(dasatinib_features).items() if count > 1]
+    if dups:
+        print(f"WARNING: Duplicate column names in Dasatinib features: {dups}")
+
+    bcl2_in_dasatinib = [f for f in dasatinib_features if 'BCL' in f.upper() or 'pBCL2' in f]
+    if bcl2_in_dasatinib:
+        print(f"WARNING: BCL2-related features found in Dasatinib features: {bcl2_in_dasatinib}")
+        print("Removing these BCL2-related features from Dasatinib feature set")
+        dasatinib_features = [f for f in dasatinib_features if f not in bcl2_in_dasatinib]
+        print(f"Updated Dasatinib feature count: {len(dasatinib_features)}")
+
+    print(f"\nNumber of features for Dasatinib prediction (after cleaning): {len(dasatinib_features)}")
+    print(f"Number of features for Venetoclax prediction (after cleaning): {len(venetoclax_features)}")
+
+    # Print a few examples of each feature set to verify
+    print("\nSample Dasatinib features:")
+    for feat in sorted(dasatinib_features)[:10]:
+        print(f"  - {feat}")
+
+    print("\nSample Venetoclax features:")
+    for feat in sorted(venetoclax_features)[:10]:
+        print(f"  - {feat}")
