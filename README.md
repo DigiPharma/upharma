@@ -133,13 +133,13 @@ The analysis generates multiple visualizations and data files:
 If you use this code in your research, please cite:
 
 ```
-@article{yourname2025pdx,
-  title={Drug-specific machine learning models for predicting sensitivity in T-ALL PDX models},
-  author={Your Name and Collaborators},
-  journal={Journal Name},
+@article{xx,
+  title={μPharma: A Microfluidic AI-driven Pharmacotyping Platform for Single-cell Drug Sensitivity Prediction in Leukemia},
+  author={Huiqian Hu, Alphonsus H. C. Ng, Yue Lu},
+  journal={xx},
   year={2025},
-  volume={},
-  pages={}
+  volume={xx},
+  pages={xx}
 }
 ```
 
@@ -149,8 +149,8 @@ If you use this code in your research, please cite:
 
 ## Acknowledgements
 
-Thanks to collaborators who contributed to this project and provided the PDX data.
+Thanks to our collaborators Dr. Jun J Yang and Dr. Huanbin Zhao from St. Jude Children’s Research Hospital who contributed to this project and provided the PDX data.
 
 ## Contact
 
-For questions or feedback, please contact [your.email@example.com](mailto:your.email@example.com).
+For questions or feedback, please contact [digipharma21@gmail.com].
