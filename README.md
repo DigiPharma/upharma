@@ -48,6 +48,7 @@ The notebook demonstrates our complete methodology using synthetic data:
 ### 5. **Interpretability**
 - SHAP analysis for feature importance
 - UMAP visualization from SHAP values
+- UMAP Contour density plot
 - Feature consistency across rotations
 
 ## Key Results to Observe
