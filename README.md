@@ -46,7 +46,7 @@ The notebook demonstrates our complete methodology using synthetic data:
 - SMOTE for class imbalance
 
 ### 5. **Interpretability**
-- SHAP analysis for feature importance
+- SHAP analysis for feature importance (Direction is determined by all the rotations'direction)
 - UMAP visualization from SHAP values
 - UMAP Contour density plot
 - Feature consistency across rotations
