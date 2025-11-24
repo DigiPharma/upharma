@@ -1,0 +1,145 @@
+# ----------------------------------------------------------------------------
+# umap_density_panels.py — per-specimen UMAP density panels grouped by response
+# ----------------------------------------------------------------------------
+# • First two reference panels: overall Sensitive- and Resistant-only densities.
+# • Specimen panels then appear in two blocks:
+#     1. All sensitive specimens (majority vote per Group)
+#     2. All resistant specimens
+# • Panel titles now append "(Sensitive)" or "(Resistant)" for quick scanning.
+# • Quartile equal‑mass contour bands (25/50/75/100 %).
+# • 8 % padding to avoid clipping; exports vector PDF + SVG.
+# ----------------------------------------------------------------------------
+
+# === FILE UPLOAD SECTION (Added) ===
+from google.colab import files
+import os
+
+print("Please upload your CSV file:")
+uploaded = files.upload()
+
+# Rename the uploaded file to match what the script expects
+for filename in uploaded.keys():
+    os.rename(filename, '/content/Dasatinib_Global_AllSamples_UMAP_Coordinates_with_Features.csv')
+    print(f"Uploaded {filename} and renamed to match expected path")
+
+import importlib.util, subprocess, sys
+if importlib.util.find_spec("scipy") is None:
+    subprocess.check_call([sys.executable, "-m", "pip", "-q", "install", "scipy"])
+
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
+from scipy.stats import gaussian_kde
+from math import ceil
+
+# ╔══════════════════ USER SETTINGS ═════════════════╗
+CSV_PATH    = "/content/Dasatinib_Global_AllSamples_UMAP_Coordinates_with_Features.csv"
+OUTPUT_BASE = "/content/umap_density_panels_grouped"  # without extension
+COLS        = 4                      # grid columns
+BAND_MASSES = [0.25, 0.50, 0.75, 1.00]
+BW_SCALE    = 0.40
+GRID_RES    = 600
+MARGIN_PROP = 0.08
+ALPHA_S, ALPHA_R = 0.18, 0.18
+POINT_SIZE  = 3
+OUTLINE_LW  = 1.0
+# ╚══════════════════════════════════════════════════╝
+
+# --- palette (Okabe‑Ito) -----------------------------------------------------
+MAGENTA, GREEN = "#CC79A7", "#009E73"
+SHADE = [0.10, 0.40, 0.65, 0.88]
+_tint = lambda c,f: tuple(np.array(to_rgb(c)) + (1-np.array(to_rgb(c)))*f)
+MAG_SH = [_tint(MAGENTA,f) for f in SHADE]
+GRN_SH = [_tint(GREEN,f)   for f in SHADE]
+
+# --- load data ---------------------------------------------------------------
+df = pd.read_csv(CSV_PATH)
+for col in ("UMAP1","UMAP2","Group","Sensitivity"):
+    if col not in df.columns:
+        raise ValueError(f"CSV missing column: {col}")
+
+x,y,grp,sens = "UMAP1","UMAP2","Group","Sensitivity"
+
+# Determine specimen‑level sensitivity (majority vote) ------------------------
+majority = df.groupby(grp)[sens].mean() >= 0.5
+sens_groups  = majority[majority].index.tolist()
+res_groups   = majority[~majority].index.tolist()
+
+# --- KDEs --------------------------------------------------------------------
+coords_S = df[df[sens]==1][[x,y]].to_numpy()
+coords_R = df[df[sens]==0][[x,y]].to_numpy()
+
+kde = lambda pts: gaussian_kde(pts.T)
+kde_S, kde_R = kde(coords_S), kde(coords_R)
+for k in (kde_S, kde_R):
+    k.set_bandwidth(k.factor*BW_SCALE)
+
+# grid + margin ---------------------------------------------------------------
+xmin,xmax = df[x].min(), df[x].max(); ymin,ymax = df[y].min(), df[y].max()
+mx,my = MARGIN_PROP*(xmax-xmin), MARGIN_PROP*(ymax-ymin)
+Xmin,Xmax,Ymin,Ymax = xmin-mx, xmax+mx, ymin-my, ymax+my
+X,Y = np.mgrid[Xmin:Xmax:complex(GRID_RES), Ymin:Ymax:complex(GRID_RES)]
+POS  = np.vstack([X.ravel(), Y.ravel()])
+Z_S, Z_R = kde_S(POS).reshape(X.shape), kde_R(POS).reshape(X.shape)
+
+thr = lambda kde, pts: sorted(np.percentile(kde(pts.T), 100*(1-m)) for m in BAND_MASSES)
+thr_S, thr_R = thr(kde_S, coords_S), thr(kde_R, coords_R)
+
+# helper ----------------------------------------------------------------------
+
+def draw_bands(ax, Z, thr, shades, alpha):
+    for i,t in enumerate(thr):
+        shade = -(i+1)
+        ax.contourf(X,Y,Z,levels=[t,Z.max()],colors=[shades[shade]],alpha=alpha)
+        ax.contour (X,Y,Z,levels=[t],colors=[shades[shade]],lw=OUTLINE_LW)
+
+# panel order -----------------------------------------------------------------
+labels = ["Sensitive", "Resistant"] + sens_groups + res_groups
+rows   = ceil(len(labels)/COLS)
+fig, axes = plt.subplots(rows, COLS, figsize=(4*COLS,4*rows), sharex=True, sharey=True)
+axes = axes.flatten()
+
+for ax,label in zip(axes, labels):
+    if label == "Sensitive":
+        draw_bands(ax, Z_S, thr_S, MAG_SH, ALPHA_S)
+        title = "Sensitive (All)"
+    elif label == "Resistant":
+        draw_bands(ax, Z_R, thr_R, GRN_SH, ALPHA_R)
+        title = "Resistant (All)"
+    else:
+        g_df = df[df[grp]==label]
+        for i,(ts,tr) in enumerate(zip(thr_S,thr_R)):
+            shade = -(i+1)
+            ax.contourf(X,Y,Z_S,levels=[ts,Z_S.max()],colors=[MAG_SH[shade]],alpha=ALPHA_S,zorder=1)
+            ax.contourf(X,Y,Z_R,levels=[tr,Z_R.max()],colors=[GRN_SH[shade]],alpha=ALPHA_R,zorder=1)
+        ax.scatter(g_df[x], g_df[y], s=POINT_SIZE, c='k', alpha=0.8, zorder=3)
+        for i,(ts,tr) in enumerate(zip(thr_S,thr_R)):
+            shade = -(i+1)
+            if i%2==0:
+                ax.contour(X,Y,Z_R,levels=[tr],colors=[GRN_SH[shade]],lw=OUTLINE_LW,zorder=4)
+                ax.contour(X,Y,Z_S,levels=[ts],colors=[MAG_SH[shade]],lw=OUTLINE_LW,zorder=5)
+            else:
+                ax.contour(X,Y,Z_S,levels=[ts],colors=[MAG_SH[shade]],lw=OUTLINE_LW,zorder=4)
+                ax.contour(X,Y,Z_R,levels=[tr],colors=[GRN_SH[shade]],lw=OUTLINE_LW,zorder=5)
+        status = "Sensitive" if label in sens_groups else "Resistant"
+        title = f"{label} ({status})"
+
+    ax.set_title(title, fontsize=8, fontweight='bold')
+    ax.set_xlim(Xmin,Xmax); ax.set_ylim(Ymin,Ymax)
+    ax.set_aspect('equal'); ax.set_xticks([]); ax.set_yticks([])
+
+for ax in axes[len(labels):]:
+    ax.axis('off')
+
+plt.tight_layout()
+plt.show()
+
+# save vector outputs and auto-download ---------------------------------------
+fig.savefig(f"{OUTPUT_BASE}.pdf", format="pdf", bbox_inches="tight")
+fig.savefig(f"{OUTPUT_BASE}.svg", format="svg", bbox_inches="tight")
+print(f"Saved to {OUTPUT_BASE}.pdf and .svg")
+
+# Auto-download the generated files
+print("\nDownloading files...")
+files.download(f"{OUTPUT_BASE}.pdf")
+files.download(f"{OUTPUT_BASE}.svg")
+print("Downloads complete!")
