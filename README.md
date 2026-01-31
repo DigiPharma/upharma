@@ -102,18 +102,13 @@ To use your own data:
 3. Adjust PDX rotations if using different groups
 
 ## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@article{upharma2025,
-  title={μPharma: A Microfluidic AI-driven Pharmacotyping Platform for 
-         Single-cell Drug Sensitivity Prediction in Leukemia},
+@article{hu2025upharma,
+  title={μPharma: A microfluidic, AI-driven pharmacotyping platform for single-cell drug sensitivity prediction in leukemia},
   author={Hu, Huiqian and Ng, Alphonsus H. C. and Lu, Yue},
-  journal={[Journal Name]},
-  year={2025}
+  journal={Med},
+  year={2025},
+  doi={10.1016/j.medj.2025.100966}
 }
-```
 
 ## Contact
 
