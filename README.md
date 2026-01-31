@@ -102,6 +102,7 @@ To use your own data:
 3. Adjust PDX rotations if using different groups
 
 ## Citation
+```bibtex
 @article{hu2025upharma,
   title={μPharma: A microfluidic, AI-driven pharmacotyping platform for single-cell drug sensitivity prediction in leukemia},
   author={Hu, Huiqian and Ng, Alphonsus H. C. and Lu, Yue},
@@ -109,6 +110,7 @@ To use your own data:
   year={2025},
   doi={10.1016/j.medj.2025.100966}
 }
+```
 
 ## Contact
 
